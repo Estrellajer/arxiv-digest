@@ -65,27 +65,19 @@ jobs:
       - name: Extract analysis JSON
         id: extract
         run: |
-          python -c "
-          import re, json, sys
-          with open('reading_output.txt', 'r') as f:
-              text = f.read()
-          # 找到包含 core_claim 的 JSON 对象
-          m = re.search(r'\{.*\"core_claim\".*\}', text, re.DOTALL)
-          if m:
-              try:
-                  data = json.loads(m.group())
-                  with open('analysis.json', 'w') as f2:
-                      json.dump(data, f2, ensure_ascii=False, indent=2)
-                  print(f'Verdict: {data.get(\"verdict\", \"\")}')
-                  print(f'Priority: {data.get(\"reading_priority\", \"\")}')
-              except json.JSONDecodeError:
-                  print('JSON parse error, saving raw')
-                  with open('analysis.json', 'w') as f2:
-                      f2.write(m.group())
-          else:
-              print('No analysis JSON found')
-              sys.exit(1)
-          "
+          if [ -f output/analysis.json ]; then
+            cp output/analysis.json analysis.json
+            python -c "
+            import json
+            with open('analysis.json') as f:
+                data = json.load(f)
+            print(f'Verdict: {data.get(\"verdict\", \"\")}')
+            print(f'Priority: {data.get(\"reading_priority\", \"\")}')
+            "
+          else
+            echo "No analysis JSON found"
+            exit 1
+          fi
 
       - name: Post comment on issue
         if: steps.paper.outputs.issue_number != ''

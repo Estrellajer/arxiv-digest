@@ -246,6 +246,16 @@ def run_reading(
             print(json.dumps(analysis, ensure_ascii=False, indent=2))
 
     print(json.dumps(analysis, ensure_ascii=False))  # always print JSON for downstream
+
+    # Also write to a known file for reliable extraction
+    try:
+        os.makedirs("output", exist_ok=True)
+        with open("output/analysis.json", "w", encoding="utf-8") as f:
+            json.dump(analysis, f, ensure_ascii=False, indent=2)
+        print("[reading] Analysis saved to output/analysis.json")
+    except Exception as e:
+        print(f"[reading] Failed to save analysis.json: {e}")
+
     return analysis
 
 
