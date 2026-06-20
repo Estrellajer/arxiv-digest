@@ -1,8 +1,9 @@
 """
-共享工具模块：LLM 客户端、飞书 API、arxiv 辅助函数。
+共享工具模块：LLM 客户端、飞书 API、arxiv 辅助函数、PaddleOCR。
 """
 
 import os
+import sys
 import json
 import time
 import hashlib
@@ -11,11 +12,31 @@ import base64
 import urllib.request
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Optional
 
 import httpx
 import yaml
 from openai import OpenAI
+
+
+# ─── .env 本地加载 ────────────────────────────────────────────────────────────
+
+def _load_dotenv():
+    """本地开发时从 .env 加载环境变量（GitHub Actions 中用 Secrets，不依赖此函数）。"""
+    env_path = Path(__file__).resolve().parent.parent / ".env"
+    if env_path.exists():
+        with open(env_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, value = line.partition("=")
+                key, value = key.strip(), value.strip()
+                if key and key not in os.environ:
+                    os.environ[key] = value
+
+_load_dotenv()
 
 
 # ─── Config ───────────────────────────────────────────────────────────────────
@@ -319,6 +340,213 @@ def build_reading_result_card(analysis: dict) -> dict:
         },
         "elements": elements,
     }
+
+
+# ─── PaddleOCR ─────────────────────────────────────────────────────────────────
+
+OCR_API_URL = "https://paddleocr.aistudio-app.com/api/v2/ocr/jobs"
+OCR_API_TOKEN = os.environ.get("OCR_API_TOKEN", "60adec91ca3d86eae269595aaa6c64ab19bc70a8")
+OCR_MODEL = os.environ.get("OCR_MODEL", "PaddleOCR-VL-1.6")
+
+
+def ocr_arxiv_pdf(arxiv_url: str, output_dir: str = "output/ocr") -> dict:
+    """
+    对 arxiv 论文 PDF 调用 PaddleOCR，返回 Markdown 文本和图片。
+
+    参数:
+        arxiv_url: arxiv 论文链接 (如 https://arxiv.org/abs/2210.03629)
+        output_dir: 输出目录
+
+    返回:
+        {"markdown": "全文markdown文本", "pages": [{"md": "...", "images": {...}}], "pdf_url": "..."}
+    """
+    # 解析 arxiv PDF URL
+    arxiv_id = arxiv_url.strip()
+    for prefix in ["https://arxiv.org/abs/", "http://arxiv.org/abs/", "arxiv.org/abs/"]:
+        if arxiv_id.startswith(prefix):
+            arxiv_id = arxiv_id[len(prefix):]
+            break
+
+    pdf_url = f"https://arxiv.org/pdf/{arxiv_id}.pdf"
+    print(f"[OCR] Processing PDF: {pdf_url}")
+
+    headers = {"Authorization": f"bearer {OCR_API_TOKEN}"}
+
+    optional_payload = {
+        "useDocOrientationClassify": False,
+        "useDocUnwarping": False,
+        "useChartRecognition": True,  # 开启图表识别，提取实验结果
+    }
+
+    # 提交 OCR job（URL 模式）
+    headers["Content-Type"] = "application/json"
+    payload = {
+        "fileUrl": pdf_url,
+        "model": OCR_MODEL,
+        "optionalPayload": optional_payload,
+    }
+
+    job_response = httpx.post(OCR_API_URL, json=payload, headers=headers, timeout=30)
+    if job_response.status_code != 200:
+        print(f"[OCR] Job submission failed: {job_response.status_code} {job_response.text}")
+        return None
+
+    job_id = job_response.json()["data"]["jobId"]
+    print(f"[OCR] Job submitted: {job_id}")
+
+    # 轮询结果
+    jsonl_url = ""
+    while True:
+        job_result = httpx.get(f"{OCR_API_URL}/{job_id}", headers=headers, timeout=15)
+        if job_result.status_code != 200:
+            print(f"[OCR] Poll failed: {job_result.status_code}")
+            time.sleep(5)
+            continue
+
+        state = job_result.json()["data"]["state"]
+        if state == "pending":
+            print("[OCR] Pending...")
+        elif state == "running":
+            try:
+                progress = job_result.json()["data"]["extractProgress"]
+                print(f"[OCR] Running: {progress.get('extractedPages', 0)}/{progress.get('totalPages', '?')} pages")
+            except KeyError:
+                print("[OCR] Running...")
+        elif state == "done":
+            progress = job_result.json()["data"]["extractProgress"]
+            print(f"[OCR] Done: {progress['extractedPages']} pages extracted")
+            jsonl_url = job_result.json()["data"]["resultUrl"]["jsonUrl"]
+            break
+        elif state == "failed":
+            error = job_result.json()["data"].get("errorMsg", "unknown")
+            print(f"[OCR] Failed: {error}")
+            return None
+
+        time.sleep(5)
+
+    if not jsonl_url:
+        print("[OCR] No result URL")
+        return None
+
+    # 下载结果
+    os.makedirs(output_dir, exist_ok=True)
+    jsonl_resp = httpx.get(jsonl_url, timeout=30)
+    jsonl_resp.raise_for_status()
+
+    lines = [l.strip() for l in jsonl_resp.text.split("\n") if l.strip()]
+
+    all_markdown = []
+    pages = []
+
+    for line_num, line in enumerate(lines):
+        result = json.loads(line)["result"]
+        for i, res in enumerate(result["layoutParsingResults"]):
+            md_text = res["markdown"]["text"]
+            all_markdown.append(md_text)
+
+            page_data = {"md": md_text, "images": []}
+
+            # 保存 Markdown
+            md_filename = os.path.join(output_dir, f"doc_{line_num}.md")
+            with open(md_filename, "w", encoding="utf-8") as f:
+                f.write(md_text)
+
+            # 下载图片
+            for img_path, img_url in res["markdown"]["images"].items():
+                full_path = os.path.join(output_dir, img_path)
+                os.makedirs(os.path.dirname(full_path), exist_ok=True)
+                try:
+                    img_bytes = httpx.get(img_url, timeout=15).content
+                    with open(full_path, "wb") as f:
+                        f.write(img_bytes)
+                    page_data["images"].append(full_path)
+                except Exception as e:
+                    print(f"[OCR] Image download failed: {img_path}: {e}")
+
+            pages.append(page_data)
+            print(f"[OCR] Page {line_num} saved: {md_filename}")
+
+    full_markdown = "\n\n".join(all_markdown)
+    print(f"[OCR] Total: {len(pages)} pages, {len(full_markdown)} characters")
+
+    return {
+        "markdown": full_markdown,
+        "pages": pages,
+        "pdf_url": pdf_url,
+        "arxiv_id": arxiv_id,
+    }
+
+
+def extract_experiment_section(ocr_result: dict) -> str:
+    """
+    从 OCR 全文 Markdown 中提取实验相关段落。
+    用启发式方法定位 Experiments / Results 部分。
+    """
+    if not ocr_result or not ocr_result.get("markdown"):
+        return ""
+
+    md = ocr_result["markdown"]
+
+    # 常见实验部分标题
+    experiment_headers = [
+        "Experiment", "Experiments", "Experimental",
+        "Results", "Evaluation", "Evaluations",
+        "实验", "结果", "评估",
+        "Main Results", "Ablation",
+    ]
+
+    lines = md.split("\n")
+    found_sections = []
+    in_section = False
+    current_section = []
+
+    for line in lines:
+        stripped = line.strip()
+        # 检测是否为标题行
+        is_header = False
+        for h in experiment_headers:
+            if stripped.lower().startswith(h.lower()) and len(stripped) < 100:
+                is_header = True
+                if current_section:
+                    found_sections.append("\n".join(current_section))
+                current_section = [line]
+                in_section = True
+                break
+
+        if not is_header and in_section:
+            # 检测是否到了下一节（简单的启发式：短行 + 首字母大写 或 数字开头）
+            if stripped and len(stripped) < 80 and (
+                stripped[0].isupper() or stripped[0].isdigit()
+            ) and not stripped.startswith(("Table", "Figure", "Fig", "|")):
+                # 可能是新章节标题
+                if any(h.lower() in stripped.lower() for h in [
+                    "conclusion", "related work", "introduction", "abstract",
+                    "method", "approach", "background", "preliminar",
+                    "reference", "appendix", "discussion", "limitation",
+                    "结论", "相关工作", "引言", "方法", "背景",
+                ]):
+                    found_sections.append("\n".join(current_section))
+                    current_section = []
+                    in_section = False
+                else:
+                    current_section.append(line)
+            else:
+                current_section.append(line)
+
+    if current_section:
+        found_sections.append("\n".join(current_section))
+
+    result = "\n\n".join(found_sections)
+
+    # 如果太长，截取前 8000 字符
+    if len(result) > 8000:
+        result = result[:8000] + "\n\n[... truncated ...]"
+
+    if not result:
+        # Fallback：返回后 40% 的内容（实验通常在后面）
+        result = md[len(md)//2:][:8000]
+
+    return result
 
 
 # ─── Feishu Event Signature Verification ──────────────────────────────────────

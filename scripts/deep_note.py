@@ -10,6 +10,7 @@ paper-deep-note: 结构化精读卡
 Usage:
     python deep_note.py --url https://arxiv.org/abs/2210.03629
     python deep_note.py --from-reading reading_output.json
+    python deep_note.py --url https://arxiv.org/abs/2210.03629 --use-ocr  # 用 OCR 读全文
 """
 
 import os
@@ -19,7 +20,10 @@ import argparse
 from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from utils import llm_chat, get_llm_model
+from utils import (
+    llm_chat, get_llm_model,
+    ocr_arxiv_pdf, extract_experiment_section,
+)
 
 
 DEEP_NOTE_SYSTEM_PROMPT = """你是一个研究笔记整理专家。你的任务是基于论文信息生成结构化的精读卡。
@@ -180,9 +184,11 @@ def run_deep_note(
     output_dir: str = None,
     dry_run: bool = False,
     model: str = None,
+    use_ocr: bool = False,
 ):
     """Generate a deep reading note."""
     paper_info = {}
+    ocr_result = None
 
     if from_reading:
         # Load from reading.py output
@@ -194,6 +200,7 @@ def run_deep_note(
             end = text.rfind("}") + 1
             if start >= 0 and end > start:
                 paper_info = json.loads(text[start:end])
+            arxiv_url = paper_info.get("abstract_url", "")
         except Exception as e:
             print(f"[deep_note] Failed to load reading output: {e}")
             return None
@@ -206,6 +213,23 @@ def run_deep_note(
         return None
 
     print(f"[deep_note] Generating note for: {paper_info.get('title', paper_info.get('paper_title', 'Unknown'))}")
+
+    # 如果开启 OCR，下载 PDF 全文提取实验部分
+    if use_ocr and arxiv_url:
+        print("[deep_note] Enabling OCR for full-text extraction...")
+        try:
+            ocr_result = ocr_arxiv_pdf(arxiv_url, output_dir="output/ocr")
+            if ocr_result:
+                exp_section = extract_experiment_section(ocr_result)
+                paper_info["full_text_experiment"] = exp_section
+                paper_info["input_coverage"] = "全文（OCR）"
+                print(f"[deep_note] OCR extracted {len(ocr_result['markdown'])} chars, experiment section: {len(exp_section)} chars")
+        except Exception as e:
+            print(f"[deep_note] OCR failed, falling back to abstract: {e}")
+
+    if not paper_info.get("input_coverage"):
+        paper_info["input_coverage"] = "仅摘要"
+
     note = generate_deep_note(paper_info, model=model)
 
     if note.get("error"):
@@ -242,6 +266,7 @@ def main():
     parser.add_argument("--from-reading", type=str, help="Path to reading.py output JSON")
     parser.add_argument("--output-dir", type=str, help="Output directory for markdown files")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--use-ocr", action="store_true", help="Use PaddleOCR to extract full text from PDF")
     args = parser.parse_args()
 
     run_deep_note(
@@ -249,6 +274,7 @@ def main():
         from_reading=args.from_reading,
         output_dir=args.output_dir,
         dry_run=args.dry_run,
+        use_ocr=args.use_ocr,
     )
 
 

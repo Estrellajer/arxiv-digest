@@ -230,7 +230,7 @@ def run_digest(
 
     if dry_run:
         print("\n[DRY RUN] Would send the following card:")
-        print(json.dumps(card, ensure_ascii=False, indent=2))
+        print(json.dumps(card, ensure_ascii=False, indent=2).encode('utf-8', errors='replace').decode('utf-8'))
         print("\n[DRY RUN] Papers that would be pushed:")
         for p in high_score:
             print(f"  [{p['score']:.2f}] {p['digest_cn']}")
