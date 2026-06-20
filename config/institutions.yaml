@@ -1,0 +1,91 @@
+snapshot:
+  source: https://csrankings.org
+  generated_at: '2026-06-20'
+  years: 2016-2026
+  areas: [ai, mlmining, nlp, vision, webir]
+  selection: union of global top 50, US top 30, and China top 10
+
+# Fixed, editable reference set. Rank is informational; every match gets the same bonus.
+universities:
+  - {name: Carnegie Mellon University, country: US, aliases: [Carnegie Mellon, CMU]}
+  - {name: Stanford University, country: US, aliases: [Stanford]}
+  - {name: Massachusetts Institute of Technology, country: US, aliases: [MIT, Massachusetts Institute of Technology]}
+  - {name: University of California Berkeley, country: US, aliases: [UC Berkeley, UCB, Berkeley]}
+  - {name: University of Illinois Urbana-Champaign, country: US, aliases: [UIUC, Illinois Urbana Champaign]}
+  - {name: University of Washington, country: US, aliases: [UW, Washington]}
+  - {name: Cornell University, country: US, aliases: [Cornell]}
+  - {name: Georgia Institute of Technology, country: US, aliases: [Georgia Tech, GaTech]}
+  - {name: University of California San Diego, country: US, aliases: [UCSD, UC San Diego]}
+  - {name: University of Michigan, country: US, aliases: [Michigan, UMich]}
+  - {name: University of Texas at Austin, country: US, aliases: [UT Austin, Texas Austin]}
+  - {name: University of California Los Angeles, country: US, aliases: [UCLA, UC Los Angeles]}
+  - {name: Princeton University, country: US, aliases: [Princeton]}
+  - {name: Columbia University, country: US, aliases: [Columbia]}
+  - {name: University of Massachusetts Amherst, country: US, aliases: [UMass Amherst, UMass]}
+  - {name: University of Pennsylvania, country: US, aliases: [UPenn, Penn]}
+  - {name: University of Maryland College Park, country: US, aliases: [UMD, Maryland College Park]}
+  - {name: New York University, country: US, aliases: [NYU]}
+  - {name: University of Wisconsin-Madison, country: US, aliases: [UW-Madison, Wisconsin Madison]}
+  - {name: University of Southern California, country: US, aliases: [USC]}
+  - {name: Purdue University, country: US, aliases: [Purdue]}
+  - {name: Northeastern University, country: US, aliases: [Northeastern]}
+  - {name: Duke University, country: US, aliases: [Duke]}
+  - {name: Harvard University, country: US, aliases: [Harvard]}
+  - {name: Yale University, country: US, aliases: [Yale]}
+  - {name: Brown University, country: US, aliases: [Brown University]}
+  - {name: Rice University, country: US, aliases: [Rice University]}
+  - {name: Johns Hopkins University, country: US, aliases: [Johns Hopkins, JHU]}
+  - {name: University of Chicago, country: US, aliases: [UChicago, Chicago]}
+  - {name: University of California Irvine, country: US, aliases: [UC Irvine, UCI]}
+  - {name: Tsinghua University, country: CN, aliases: [Tsinghua, 清华大学, 清华]}
+  - {name: Peking University, country: CN, aliases: [PKU, Peking University, 北京大学, 北大]}
+  - {name: Zhejiang University, country: CN, aliases: [ZJU, Zhejiang University, 浙江大学, 浙大]}
+  - {name: Shanghai Jiao Tong University, country: CN, aliases: [SJTU, 上海交通大学, 上海交大]}
+  - {name: University of Science and Technology of China, country: CN, aliases: [USTC, 中国科学技术大学, 中科大]}
+  - {name: Nanjing University, country: CN, aliases: [NJU, 南京大学, 南大]}
+  - {name: Fudan University, country: CN, aliases: [Fudan, 复旦大学, 复旦]}
+  - {name: Harbin Institute of Technology, country: CN, aliases: [HIT, 哈尔滨工业大学, 哈工大]}
+  - {name: Renmin University of China, country: CN, aliases: [RUC, 中国人民大学, 人大]}
+  - {name: Beihang University, country: CN, aliases: [BUAA, Beihang, 北京航空航天大学, 北航]}
+  - {name: University of Toronto, country: CA, aliases: [Toronto, UofT]}
+  - {name: University of British Columbia, country: CA, aliases: [UBC]}
+  - {name: University of Montreal, country: CA, aliases: [Université de Montréal, Montreal, Mila]}
+  - {name: McGill University, country: CA, aliases: [McGill]}
+  - {name: University of Oxford, country: UK, aliases: [Oxford]}
+  - {name: University of Cambridge, country: UK, aliases: [Cambridge]}
+  - {name: University College London, country: UK, aliases: [UCL]}
+  - {name: Imperial College London, country: UK, aliases: [Imperial College, Imperial]}
+  - {name: University of Edinburgh, country: UK, aliases: [Edinburgh]}
+  - {name: ETH Zurich, country: CH, aliases: [ETH Zürich, ETH]}
+  - {name: EPFL, country: CH, aliases: [École Polytechnique Fédérale de Lausanne]}
+  - {name: National University of Singapore, country: SG, aliases: [NUS]}
+  - {name: Nanyang Technological University, country: SG, aliases: [NTU Singapore, NTU]}
+  - {name: KAIST, country: KR, aliases: [Korea Advanced Institute of Science and Technology]}
+  - {name: Seoul National University, country: KR, aliases: [SNU]}
+  - {name: University of Tokyo, country: JP, aliases: [Tokyo University, UTokyo, 東京大学]}
+
+companies:
+  - {name: OpenAI, aliases: [OpenAI]}
+  - {name: Anthropic, aliases: [Anthropic]}
+  - {name: Google DeepMind, aliases: [Google DeepMind, DeepMind, Google Research, Gemini]}
+  - {name: Meta AI, aliases: [Meta AI, Meta FAIR, FAIR, Facebook AI Research]}
+  - {name: Microsoft AI, aliases: [Microsoft Research, Microsoft AI, MSR]}
+  - {name: NVIDIA, aliases: [NVIDIA, NVIDIA Research]}
+  - {name: Amazon, aliases: [Amazon, AWS, Amazon AGI, Amazon Science]}
+  - {name: Apple, aliases: [Apple, Apple Machine Learning Research]}
+  - {name: xAI, aliases: [xAI]}
+  - {name: Mistral AI, aliases: [Mistral AI, Mistral]}
+  - {name: Cohere, aliases: [Cohere]}
+  - {name: DeepSeek, aliases: [DeepSeek, 深度求索]}
+  - {name: Alibaba Qwen, aliases: [Alibaba, Alibaba Cloud, Qwen, Tongyi, DAMO Academy, 通义, 千问, 达摩院]}
+  - {name: Tencent Hunyuan, aliases: [Tencent, Hunyuan, Tencent AI Lab, 腾讯, 混元]}
+  - {name: ByteDance Seed, aliases: [ByteDance, Seed, Doubao, 字节跳动, 豆包]}
+  - {name: Zhipu AI, aliases: [Zhipu, Zhipu AI, ChatGLM, GLM, 智谱]}
+  - {name: Moonshot AI, aliases: [Moonshot AI, Kimi, 月之暗面]}
+  - {name: MiniMax, aliases: [MiniMax, 稀宇科技]}
+  - {name: Huawei, aliases: [Huawei, Noah's Ark Lab, Pangu, 华为, 诺亚方舟实验室, 盘古]}
+  - {name: Baidu ERNIE, aliases: [Baidu, ERNIE, Wenxin, 百度, 文心]}
+  - {name: Meituan LongCat, aliases: [Meituan, LongCat, 美团]}
+  - {name: StepFun, aliases: [StepFun, 阶跃星辰]}
+  - {name: Shanghai AI Laboratory, aliases: [Shanghai AI Laboratory, Shanghai AI Lab, InternLM, 上海人工智能实验室, 书生浦语]}
+

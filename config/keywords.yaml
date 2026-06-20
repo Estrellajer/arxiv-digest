@@ -32,3 +32,8 @@ max_papers: 10
 
 # 查询天数（查最近 N 天的新论文）
 lookback_days: 1
+
+# 两阶段 OCR 与机构加分
+ocr_prefilter_threshold: 0.45
+ocr_candidate_limit: 20
+institution_bonus_max: 0.08

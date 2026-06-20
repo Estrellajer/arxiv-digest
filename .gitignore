@@ -4,6 +4,7 @@ __pycache__/
 *.egg-info/
 dist/
 build/
+output/
 .venv/
 venv/
 
@@ -22,7 +23,3 @@ Thumbs.db
 # Secrets — never commit
 secrets.json
 *.secret
-
-# Cloudflare
-cloudflare-worker/.wrangler/
-cloudflare-worker/node_modules/

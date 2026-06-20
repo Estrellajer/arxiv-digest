@@ -24,45 +24,10 @@ from utils import (
     llm_chat, get_llm_model,
     ocr_arxiv_pdf, extract_experiment_section,
 )
+from paper_context import load_prompt
 
 
-DEEP_NOTE_SYSTEM_PROMPT = """你是一个研究笔记整理专家。你的任务是基于论文信息生成结构化的精读卡。
-
-**硬约束（违反就是废卡）**：
-1. 绝对不能编造实验数字。如果实验部分不可获取，写"未知（需阅读全文）"。
-2. 绝对不能编造消融实验结论。没看到消融就说"未知"。
-3. 绝对不能编造数据集的具体细节（样本数、类数等），除非摘要或你输入的信息中明确提到。
-4. 绝对不能编造开源状态或代码链接，除非明确知道。
-5. 所有不确定的字段必须显式标"未知"。
-6. 如果输入只有摘要，必须在"输入覆盖范围"中明确标注"仅基于摘要分析"。
-
-输出 JSON 格式：
-{
-  "paper_title": "论文标题",
-  "arxiv_id": "xxxx.xxxxx",
-  "input_coverage": "全文/仅摘要/摘要+intro/...",
-  "research_question": "一句话：这篇论文要解决什么问题",
-  "method": {
-    "name": "方法名（如果有）",
-    "category": "方法类型：new_model|benchmark|theory|system|survey|其他",
-    "summary": "方法概述（300 字以内）"
-  },
-  "key_findings": ["发现 1", "发现 2"],
-  "experiments": {
-    "datasets": ["数据集 1", "数据集 2 或未知"],
-    "baselines": ["baseline 1", "baseline 2 或未知"],
-    "metrics": ["metric 1 或未知"],
-    "main_results": "主要实验结果叙述（不编造数字）",
-    "ablation": "消融实验概述或未知"
-  },
-  "limitations": ["局限 1", "局限 2 或未知"],
-  "reproducibility_concerns": ["复现难点 1 或未知"],
-  "inspirations": ["对你的启发 1"],
-  "reading_priority": "值得精读|值得速读|可暂缓",
-  "tags": ["tag1", "tag2"],
-  "generated_at": "生成时间 ISO 格式"
-}
-"""
+DEEP_NOTE_SYSTEM_PROMPT = load_prompt("deep_note")
 
 
 def generate_deep_note(paper_info: dict, model: str = None) -> dict:
@@ -74,7 +39,6 @@ def generate_deep_note(paper_info: dict, model: str = None) -> dict:
     title = paper_info.get("title", paper_info.get("paper_title", ""))
     summary = paper_info.get("summary", "")
     authors = paper_info.get("authors", [])
-    analysis = paper_info.get("core_claim", "")  # from reading.py
 
     user_prompt = f"""论文信息：
 
@@ -83,7 +47,7 @@ def generate_deep_note(paper_info: dict, model: str = None) -> dict:
 摘要：{summary}
 
 已有分析（来自 paper-reading）：
-{json.dumps({k: v for k, v in paper_info.items() if k not in ['summary', 'authors']}, ensure_ascii=False, indent=2) if analysis else '无'}
+{json.dumps({k: v for k, v in paper_info.items() if k not in ['summary', 'authors']}, ensure_ascii=False, indent=2)}
 
 请生成精读卡。"""
 

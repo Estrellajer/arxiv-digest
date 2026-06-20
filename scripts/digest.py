@@ -24,31 +24,16 @@ from utils import (
     fetch_arxiv_papers,
     send_feishu_card, build_digest_card,
     chunk_list,
+    ocr_arxiv_pdf,
+)
+from paper_context import (
+    apply_institution_bonus, build_ocr_evidence, load_prompt,
 )
 
 
 # ─── Scoring (保守打分) ───────────────────────────────────────────────────────
 
-SCORING_SYSTEM_PROMPT = """You are a strict research paper reviewer screening arxiv submissions for relevance to specific research interests.
-
-Your job is to assign a relevance score (0-1) to each paper based on whether it genuinely relates to the user's keywords.
-
-**CRITICAL RULES — conservative scoring**:
-1. DEFAULT to LOW scores. Only give high scores when you are genuinely confident the paper is relevant.
-2. A keyword appearing in passing or as background context does NOT make a paper relevant.
-3. The paper's CORE contribution must relate to the keywords.
-4. If the abstract is vague or you're unsure, score LOW (0.35 or below).
-5. "Better to miss a relevant paper than to flood the user with noise."
-6. Title-only matches with no abstract substance → score 0.4 max.
-
-Output format: a JSON object with:
-{
-  "scores": [
-    {"arxiv_id": "xxxx.xxxxx", "score": 0.85, "reason": "one line Chinese reason"},
-    ...
-  ]
-}
-"""
+SCORING_SYSTEM_PROMPT = load_prompt("digest_scoring")
 
 
 def score_papers(papers: list[dict], keywords: list[str], model: str = None) -> list[dict]:
@@ -113,9 +98,11 @@ def score_papers(papers: list[dict], keywords: list[str], model: str = None) -> 
     for p in papers:
         score_info = all_scores.get(p["arxiv_id"], None)
         if score_info:
-            p["score"] = score_info.get("score", 0.0)
+            p["content_score"] = float(score_info.get("score", 0.0))
+            p["score"] = p["content_score"]
             p["score_reason"] = score_info.get("reason", "")
         else:
+            p["content_score"] = 0.0
             p["score"] = 0.0
             p["score_reason"] = ""
         scored_papers.append(p)
@@ -125,17 +112,7 @@ def score_papers(papers: list[dict], keywords: list[str], model: str = None) -> 
 
 # ─── Chinese Digest Generation ────────────────────────────────────────────────
 
-DIGEST_SYSTEM_PROMPT = """你是一个论文速递编辑。用**一句话中文**总结论文的核心贡献。
-
-要求：
-1. 只写一句话，不超过 80 个字
-2. 只描述论文做了什么，不评价好坏
-3. 用中文技术术语，确保领域内的人一看就懂
-4. 不要用"本文""这篇论文"开头，直接说方法/发现
-5. 如果论文提出了新方法：说方法名 + 解决什么问题
-6. 如果是 benchmark/数据集：说规模和特点
-7. 如果是理论分析：说主要结论
-"""
+DIGEST_SYSTEM_PROMPT = load_prompt("digest_decision")
 
 
 def generate_digests(papers: list[dict], model: str = None, max_workers: int = 5) -> list[dict]:
@@ -145,16 +122,29 @@ def generate_digests(papers: list[dict], model: str = None, max_workers: int = 5
 
     def digest_one(paper: dict) -> dict:
         try:
+            evidence = paper.get("ocr_evidence", {})
             content = llm_chat(
                 messages=[
                     {"role": "system", "content": DIGEST_SYSTEM_PROMPT},
-                    {"role": "user", "content": f"Title: {paper['title']}\nAbstract: {paper['summary'][:1200]}"},
+                    {"role": "user", "content": (
+                        f"标题：{paper['title']}\n摘要：{paper['summary'][:1600]}\n"
+                        f"首页 OCR：{evidence.get('first_page', '')[:4000]}\n"
+                        f"实验 OCR：{evidence.get('experiment', '')[:5000]}\n"
+                        f"可信代码链接：{evidence.get('code_urls', [])}"
+                    )},
                 ],
                 model=model,
                 temperature=0.2,
-                max_tokens=200,
+                max_tokens=1000,
+                response_format={"type": "json_object"},
             )
-            paper["digest_cn"] = content.strip()
+            decision = json.loads(content)
+            paper["decision"] = decision
+            selected_url = decision.get("code_url", "")
+            evidence_urls = evidence.get("code_urls", [])
+            if selected_url in evidence_urls:
+                paper["code_url"] = selected_url
+            paper["digest_cn"] = decision.get("quick_take") or decision.get("core_method", "未知")
         except Exception as e:
             paper["digest_cn"] = paper["summary"][:100] + "..."
             print(f"[digest error for {paper['arxiv_id']}] {e}")
@@ -174,6 +164,59 @@ def generate_digests(papers: list[dict], model: str = None, max_workers: int = 5
     return [id_to_paper.get(p["arxiv_id"], p) for p in papers]
 
 
+def enrich_with_ocr(
+    papers: list[dict],
+    candidate_limit: int = 20,
+    prefilter_threshold: float = 0.45,
+    institution_bonus_max: float = 0.08,
+    max_workers: int = 3,
+) -> list[dict]:
+    """OCR the strongest candidates once, then attach grounded evidence and score components."""
+    ranked = sorted(papers, key=lambda p: p.get("content_score", 0), reverse=True)
+    eligible = [p for p in ranked if p.get("content_score", 0) >= prefilter_threshold]
+    candidates = eligible[:candidate_limit]
+    if len(candidates) < candidate_limit:
+        seen = {p["arxiv_id"] for p in candidates}
+        candidates.extend(p for p in ranked if p["arxiv_id"] not in seen)
+        candidates = candidates[:candidate_limit]
+
+    def enrich(paper: dict) -> dict:
+        try:
+            output_dir = os.path.join("output", "ocr", paper["arxiv_id"].replace("/", "_"))
+            ocr_result = ocr_arxiv_pdf(paper["abstract_url"], output_dir=output_dir)
+            evidence = build_ocr_evidence(ocr_result, paper["abstract_url"])
+        except Exception as exc:
+            print(f"[digest OCR] {paper['arxiv_id']} failed: {exc}")
+            evidence = {"first_page": "", "experiment": "", "institutions": [], "code_urls": [], "ocr_status": "failed", "error": str(exc)}
+
+        paper["ocr_evidence"] = evidence
+        paper["recognized_institutions"] = evidence.get("institutions", [])
+        paper["code_url"] = (evidence.get("code_urls") or [""])[0]
+        final_score, bonus = apply_institution_bonus(
+            paper.get("content_score", 0), paper["recognized_institutions"], institution_bonus_max
+        )
+        paper["institution_bonus"] = bonus
+        paper["final_score"] = final_score
+        paper["score"] = final_score
+        paper["ocr_status"] = evidence.get("ocr_status", "failed")
+        return paper
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = [executor.submit(enrich, p) for p in candidates]
+        for future in as_completed(futures):
+            future.result()
+
+    candidate_ids = {p["arxiv_id"] for p in candidates}
+    for paper in papers:
+        if paper["arxiv_id"] not in candidate_ids:
+            paper.update({
+                "recognized_institutions": [], "code_url": "", "institution_bonus": 0.0,
+                "final_score": paper.get("content_score", 0), "score": paper.get("content_score", 0),
+                "ocr_status": "not_selected",
+            })
+    return papers
+
+
 # ─── Main Pipeline ────────────────────────────────────────────────────────────
 
 def run_digest(
@@ -187,6 +230,9 @@ def run_digest(
     scoring_model: str = None,
     digest_model: str = None,
     config_path: str = None,
+    ocr_prefilter_threshold: float = 0.45,
+    ocr_candidate_limit: int = 20,
+    institution_bonus_max: float = 0.08,
 ):
     print(f"[digest] Fetching papers from categories: {categories}")
     print(f"[digest] Keywords: {keywords} | Threshold: {threshold} | Max: {max_papers} | Lookback: {lookback_days}d")
@@ -206,7 +252,17 @@ def run_digest(
 
     # Step 2: Score
     scored = score_papers(papers, keywords, model=scoring_model)
-    high_score = [p for p in scored if p.get("score", 0) >= threshold]
+    scored = enrich_with_ocr(
+        scored,
+        candidate_limit=ocr_candidate_limit,
+        prefilter_threshold=ocr_prefilter_threshold,
+        institution_bonus_max=institution_bonus_max,
+    )
+    os.makedirs("output", exist_ok=True)
+    with open("output/digest_analysis.json", "w", encoding="utf-8") as f:
+        json.dump(scored, f, ensure_ascii=False, indent=2)
+
+    high_score = [p for p in scored if p.get("final_score", 0) >= threshold]
     high_score.sort(key=lambda p: p.get("score", 0), reverse=True)
     high_score = high_score[:max_papers]
 
@@ -224,6 +280,8 @@ def run_digest(
 
     # Step 3: Chinese digest
     high_score = generate_digests(high_score, model=digest_model)
+    with open("output/digest_analysis.json", "w", encoding="utf-8") as f:
+        json.dump(scored, f, ensure_ascii=False, indent=2)
 
     # Step 4: Build card & push
     card = build_digest_card(high_score)
@@ -286,6 +344,9 @@ def main():
         scoring_model=scoring_model,
         digest_model=digest_model,
         config_path=args.config,
+        ocr_prefilter_threshold=float(config.get("ocr_prefilter_threshold", 0.45)),
+        ocr_candidate_limit=int(config.get("ocr_candidate_limit", 20)),
+        institution_bonus_max=float(config.get("institution_bonus_max", 0.08)),
     )
 
 

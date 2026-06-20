@@ -11,6 +11,10 @@ on:
         required: true
         type: string
 
+permissions:
+  contents: read
+  issues: write
+
 jobs:
   analyze:
     runs-on: ubuntu-latest
@@ -58,9 +62,13 @@ jobs:
           LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
           LLM_BASE_URL: ${{ secrets.LLM_BASE_URL }}
           LLM_MODEL: ${{ secrets.LLM_MODEL }}
-          FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
+          FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
+          FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
+          FEISHU_RECEIVE_ID: ${{ secrets.FEISHU_RECEIVE_ID }}
+          FEISHU_RECEIVE_ID_TYPE: ${{ secrets.FEISHU_RECEIVE_ID_TYPE }}
+          OCR_API_TOKEN: ${{ secrets.OCR_API_TOKEN }}
         run: |
-          python scripts/reading.py --url "${{ steps.paper.outputs.url }}" --push-to-feishu 2>&1 | tee reading_output.txt
+          python scripts/reading.py --url "${{ steps.paper.outputs.url }}" --use-ocr --push-to-feishu 2>&1 | tee reading_output.txt
 
       - name: Extract analysis JSON
         id: extract
@@ -78,24 +86,24 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          VERDICT=$(python -c "import json; d=json.load(open('analysis.json')); print(d.get('verdict','未知'))")
           PRIORITY=$(python -c "import json; d=json.load(open('analysis.json')); print(d.get('reading_priority','可暂缓'))")
-          EVIDENCE=$(python -c "import json; d=json.load(open('analysis.json')); print(d.get('evidence_level','未知'))")
-          CLAIM=$(python -c "import json; d=json.load(open('analysis.json')); print(d.get('core_claim','')[:200])")
+          SUMMARY=$(python -c "import json; d=json.load(open('analysis.json')); print(d.get('quick_take','未知')[:300])")
+          QUESTION=$(python -c "import json; d=json.load(open('analysis.json')); print(d.get('research_question','未知')[:200])")
+          REASON=$(python -c "import json; d=json.load(open('analysis.json')); print(d.get('priority_reason','未知')[:200])")
 
           COMMENT=$(cat <<EOF
           ## 📖 精读分析完成
 
-          **核心 Claim**: ${CLAIM}
+          **30 秒理解**: ${SUMMARY}
 
-          **证据强度**: ${EVIDENCE}
+          **研究问题**: ${QUESTION}
 
-          **判定**: ${VERDICT}
+          **推荐理由**: ${REASON}
 
           **阅读优先级**: ${PRIORITY}
 
           ---
-          完整结果已推送到飞书群。
+          完整结果已通过飞书应用私聊推送。
           EOF
           )
 
@@ -121,3 +129,16 @@ jobs:
           else
             echo "Skipping deep note (priority: $PRIORITY)"
           fi
+
+      - name: Upload reading evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: paper-reading-evidence
+          path: |
+            analysis.json
+            output/analysis.json
+            output/ocr/**/*.md
+            output/*_deepnote.md
+          if-no-files-found: ignore
+          retention-days: 14

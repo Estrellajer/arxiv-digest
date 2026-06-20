@@ -25,6 +25,7 @@ from utils import (
     send_feishu_message, build_reading_result_card,
     ocr_arxiv_pdf, extract_experiment_section,
 )
+from paper_context import build_ocr_evidence, load_prompt
 
 
 # ─── Arxiv Paper Fetcher (single paper) ──────────────────────────────────────
@@ -80,42 +81,10 @@ def fetch_single_paper(arxiv_id: str) -> dict:
 
 # ─── Decision-level Reading ───────────────────────────────────────────────────
 
-READING_SYSTEM_PROMPT = """你是一个严苛的论文审稿人。你的任务是做决策性阅读——回答读者真正关心的问题，而不是复述摘要。
-
-**核心原则**：
-1. 严格区分三类断言：
-   - "论文明确说"：论文原文直接陈述的内容
-   - "合理推断"：基于论文内容的合理推论
-   - "未支撑"：论文没有提供证据的说法（即使看起来像结论）
-2. 不要编造任何实验数字、消融结论、数据集细节、开源状态。不确定就写"未知"。
-3. 对声明保持怀疑：高调声明 + 弱实验 = 红旗。
-
-输出 JSON 格式：
-{
-  "title": "论文标题",
-  "core_claim": "论文的核心 claim（一句话）",
-  "claims": [
-    {"statement": "具体 claim", "type": "explicit|inference|unsupported", "evidence": "支撑证据或缺失说明"}
-  ],
-  "method_summary": "方法概述（200 字以内，只描述论文说了什么）",
-  "key_figure": "最核心的实验图/表是什么，承载了什么信息",
-  "evidence_level": "strong|moderate|weak|insufficient",
-  "evidence_assessment": "对实验设计的整体评价",
-  "reproducibility": {
-    "difficulty": "low|medium|high|unknown",
-    "risks": "复现时可能的坑",
-    "open_source": "true|false|unknown",
-    "code_url": "如果有的话"
-  },
-  "engineering_risks": "工程落地可能的崩点",
-  "verdict": "值得复现|值得速读|可跳过",
-  "reading_priority": "值得精读|值得速读|可暂缓",
-  "verdict_reason": "一句话判定理由"
-}
-"""
+READING_SYSTEM_PROMPT = load_prompt("reading")
 
 
-def analyze_paper(paper: dict, model: str = None, full_text_experiment: str = None) -> dict:
+def analyze_paper(paper: dict, model: str = None, ocr_evidence: dict = None) -> dict:
     """对单篇论文进行决策性阅读分析。
 
     Args:
@@ -134,15 +103,19 @@ def analyze_paper(paper: dict, model: str = None, full_text_experiment: str = No
 
 arxiv: {paper['abstract_url']}"""
 
-    if full_text_experiment:
+    if ocr_evidence:
         user_prompt += f"""
 
-⚠️ 以下是从论文 PDF 全文 OCR 提取的**实验部分**（可能包含格式噪音）：
----
-{full_text_experiment}
----
+首页 OCR：
+{ocr_evidence.get('first_page', '')[:5000]}
 
-请结合摘要和上述实验内容进行全面分析。注意：OCR 可能有识别错误，数字和表格可能不准确。"""
+实验章节 OCR：
+{ocr_evidence.get('experiment', '')[:8000]}
+
+论文证据中的代码链接：{ocr_evidence.get('code_urls', [])}
+识别机构：{ocr_evidence.get('institutions', [])}
+
+OCR 可能含格式噪音；数字必须以输入中明确出现的内容为准。"""
 
     user_prompt += "\n\n请严格按照系统 prompt 的要求进行分析。"
 
@@ -201,49 +174,44 @@ def run_reading(
     print(f"[reading] Title: {paper['title']}")
 
     # OCR 全文提取实验部分
-    full_text_exp = None
+    ocr_evidence = None
     if use_ocr:
         print("[reading] Running OCR on PDF...")
         try:
             ocr_result = ocr_arxiv_pdf(paper["abstract_url"], output_dir="output/ocr")
             if ocr_result:
-                full_text_exp = extract_experiment_section(ocr_result)
-                print(f"[reading] OCR done, experiment section: {len(full_text_exp)} chars")
+                ocr_evidence = build_ocr_evidence(ocr_result, paper["abstract_url"])
+                print(f"[reading] OCR done, experiment section: {len(ocr_evidence['experiment'])} chars")
         except Exception as e:
             print(f"[reading] OCR failed: {e}")
 
     print(f"[reading] Analyzing...")
-    analysis = analyze_paper(paper, model=model, full_text_experiment=full_text_exp)
+    analysis = analyze_paper(paper, model=model, ocr_evidence=ocr_evidence)
+    analysis["input_coverage"] = "OCR 首页+实验章节" if ocr_evidence else "仅摘要"
+    analysis["ocr_status"] = (ocr_evidence or {}).get("ocr_status", "failed" if use_ocr else "not_requested")
+    analysis["source_evidence"] = ocr_evidence or {"first_page": "", "experiment": "", "institutions": [], "code_urls": []}
 
     if dry_run:
         print("\n[DRY RUN] Analysis result:")
         print(json.dumps(analysis, ensure_ascii=False, indent=2))
         return analysis
 
-    # Push result to Feishu
+    # 精读结果使用飞书应用发送；每日速递仍可使用群自定义机器人。
     if push_to_feishu:
-        from utils import send_feishu_card
-        card = build_reading_result_card(analysis)
-        webhook = os.environ.get("FEISHU_WEBHOOK", "")
-        if webhook:
-            ok = send_feishu_card(webhook, card)
-            if ok:
-                print("[reading] ✅ Result pushed to Feishu webhook")
-            else:
-                print("[reading] ❌ Failed to push to Feishu webhook")
-        else:
-            print("[reading] FEISHU_WEBHOOK not set. Printing result:")
-            print(json.dumps(analysis, ensure_ascii=False, indent=2))
-    else:
-        # Try send via app API
         card = build_reading_result_card(analysis)
         card_json = json.dumps(card, ensure_ascii=False)
         receive_id = os.environ.get("FEISHU_RECEIVE_ID", "")
         if receive_id:
             ok = send_feishu_message(receive_id, "interactive", card_json)
+            if ok:
+                print("[reading] ✅ Result pushed via Feishu app")
+            else:
+                print("[reading] ❌ Failed to push via Feishu app")
         else:
             print("[reading] FEISHU_RECEIVE_ID not set. Printing result:")
             print(json.dumps(analysis, ensure_ascii=False, indent=2))
+    else:
+        print(json.dumps(analysis, ensure_ascii=False, indent=2))
 
     print(json.dumps(analysis, ensure_ascii=False))  # always print JSON for downstream
 
@@ -265,7 +233,7 @@ def main():
     parser.add_argument("--id", type=str, help="Arxiv paper ID")
     parser.add_argument("--dry-run", action="store_true", help="Print without pushing to Feishu")
     parser.add_argument("--use-ocr", action="store_true", help="Use PaddleOCR to extract full text from PDF")
-    parser.add_argument("--push-to-feishu", action="store_true", help="Push result via Feishu webhook")
+    parser.add_argument("--push-to-feishu", action="store_true", help="Push result via Feishu app API")
     args = parser.parse_args()
 
     if not args.url and not args.id:

@@ -25,7 +25,7 @@ on:
 jobs:
   digest:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - name: Set up Python
@@ -40,9 +40,21 @@ jobs:
           LLM_BASE_URL: ${{ secrets.LLM_BASE_URL }}
           LLM_MODEL: ${{ secrets.LLM_MODEL }}
           FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
+          OCR_API_TOKEN: ${{ secrets.OCR_API_TOKEN }}
         run: |
           python scripts/digest.py \
             --categories "${{ github.event.inputs.categories || 'cs.CL,cs.AI,cs.LG' }}" \
             --keywords "${{ github.event.inputs.keywords || '' }}" \
             --threshold "${{ github.event.inputs.threshold || '0.75' }}" \
             --lookback "${{ github.event.inputs.lookback || '1' }}"
+
+      - name: Upload digest analysis
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: digest-analysis
+          path: |
+            output/digest_analysis.json
+            output/ocr/**/*.md
+          if-no-files-found: ignore
+          retention-days: 7

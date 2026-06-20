@@ -6,9 +6,7 @@ import os
 import sys
 import json
 import time
-import hashlib
-import hmac
-import base64
+import re
 import urllib.request
 import urllib.parse
 import xml.etree.ElementTree as ET
@@ -200,16 +198,25 @@ def build_digest_card(papers: list[dict]) -> dict:
     })
 
     for i, paper in enumerate(papers):
-        score = paper.get("score", 0)
-        digest_cn = paper.get("digest_cn", paper["summary"][:200])
-        authors_short = ", ".join(paper["authors"][:3])
-        if len(paper["authors"]) > 3:
-            authors_short += f" et al."
+        content_score = paper.get("content_score", paper.get("score", 0))
+        bonus = paper.get("institution_bonus", 0)
+        final_score = paper.get("final_score", paper.get("score", 0))
+        decision = paper.get("decision", {})
+        recognized = [i["name"] for i in paper.get("recognized_institutions", [])]
+        institutions = ", ".join(recognized or decision.get("affiliations", [])) or "未识别"
+        code_url = paper.get("code_url")
+        code_text = f"[代码/项目]({code_url})" if code_url else "未发现论文明确代码链接"
+        coverage = "OCR 首页+实验" if paper.get("ocr_status") == "success" else "仅摘要"
 
         paper_text = (
             f"**{i+1}. [{paper['title']}]({paper['abstract_url']})**\n"
-            f"相关度：{score:.2f}  |  {authors_short}\n"
-            f"💬 {digest_cn}\n"
+            f"🏢 **机构**：{institutions} ｜ {code_text}\n"
+            f"❓ **问题**：{decision.get('research_question', '未知')}\n"
+            f"🧠 **方法**：{decision.get('core_method', '未知')}\n"
+            f"📊 **证据**：{decision.get('key_experiment', '未知')}\n"
+            f"✅ **推荐**：{decision.get('recommendation', paper.get('score_reason', '未知'))}\n"
+            f"⚠️ **风险**：{decision.get('risk', '未知')} ｜ 输入：{coverage}\n"
+            f"**评分**：内容 {content_score:.2f} + 机构 {bonus:.2f} = {final_score:.2f}\n"
         )
         elements.append({"tag": "markdown", "content": paper_text})
 
@@ -274,7 +281,7 @@ def send_feishu_message(
 ) -> bool:
     """
     通过飞书应用 API 发送消息。
-    receive_id: 用户 open_id 或 chat_id
+    receive_id: 用户 open_id 或群 chat_id
     msg_type: "interactive" (卡片) 或 "text"
     content: JSON string of message content
     """
@@ -283,6 +290,11 @@ def send_feishu_message(
 
     if not app_id or not app_secret:
         print("[feishu] FEISHU_APP_ID or FEISHU_APP_SECRET not set, skipping message send")
+        return False
+
+    receive_id_type = os.environ.get("FEISHU_RECEIVE_ID_TYPE") or "chat_id"
+    if receive_id_type not in {"open_id", "user_id", "union_id", "email", "chat_id"}:
+        print(f"[feishu] Unsupported FEISHU_RECEIVE_ID_TYPE: {receive_id_type}")
         return False
 
     token = _get_feishu_tenant_token(app_id, app_secret)
@@ -296,7 +308,7 @@ def send_feishu_message(
         "content": content,
     }
     resp = httpx.post(
-        "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=open_id",
+        f"https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type={receive_id_type}",
         headers=headers,
         json=payload,
         timeout=15,
@@ -311,26 +323,26 @@ def send_feishu_message(
 def build_reading_result_card(analysis: dict) -> dict:
     """构建 paper-reading 分析结果的飞书卡片。"""
     title = analysis.get("title", "Unknown")
-    claims = analysis.get("claims", [])
-    evidence_level = analysis.get("evidence_level", "未知")
-    reproducibility = analysis.get("reproducibility", {})
-    verdict = analysis.get("verdict", "")
+    input_coverage = analysis.get("input_coverage", "仅摘要")
     reading_priority = analysis.get("reading_priority", "")
-
-    claim_lines = ""
-    for c in claims[:5]:
-        tag_map = {"explicit": "✅ 论文明确说", "inference": "⚠️ 合理推断", "unsupported": "❌ 未支撑"}
-        tag = tag_map.get(c.get("type", ""), "❓")
-        claim_lines += f"\n{tag} {c.get('statement', '')}"
+    steps = "\n".join(f"{i + 1}. {step}" for i, step in enumerate(analysis.get("method_steps", [])[:5])) or "未知"
+    experiments = "\n".join(
+        f"- {item.get('result', '未知')}（{item.get('meaning', '未知')}）"
+        for item in analysis.get("key_experiments", [])[:4]
+    ) or "未知"
+    limitations = "；".join(analysis.get("limitations", [])[:3]) or "未知"
+    guide = "；".join(analysis.get("reading_guide", [])[:3]) or "未知"
 
     elements = [
-        {"tag": "markdown", "content": f"**📖 精读分析：{title[:80]}**"},
+        {"tag": "markdown", "content": f"**📖 {title[:80]}**\n{analysis.get('quick_take', '未知')}"},
         {"tag": "hr"},
-        {"tag": "markdown", "content": f"**核心 Claims**\n{claim_lines}"},
+        {"tag": "markdown", "content": f"**研究问题**：{analysis.get('research_question', '未知')}\n**核心直觉**：{analysis.get('core_intuition', '未知')}"},
         {"tag": "hr"},
-        {"tag": "markdown", "content": f"**证据强度**：{evidence_level}\n**复现难度**：{reproducibility.get('difficulty', '未知')}\n**复现风险**：{reproducibility.get('risks', '未知')}"},
+        {"tag": "markdown", "content": f"**方法步骤**\n{steps}"},
         {"tag": "hr"},
-        {"tag": "markdown", "content": f"**判定**：{verdict}\n**阅读优先级**：{reading_priority}"},
+        {"tag": "markdown", "content": f"**关键实验**\n{experiments}"},
+        {"tag": "hr"},
+        {"tag": "markdown", "content": f"**局限**：{limitations}\n**阅读指南**：{guide}\n**代码**：{analysis.get('code_url', '未知')}\n**分析输入**：{input_coverage}\n**优先级**：{reading_priority}｜{analysis.get('priority_reason', '')}"},
     ]
 
     return {
@@ -345,11 +357,12 @@ def build_reading_result_card(analysis: dict) -> dict:
 # ─── PaddleOCR ─────────────────────────────────────────────────────────────────
 
 OCR_API_URL = "https://paddleocr.aistudio-app.com/api/v2/ocr/jobs"
-OCR_API_TOKEN = os.environ.get("OCR_API_TOKEN", "60adec91ca3d86eae269595aaa6c64ab19bc70a8")
+OCR_API_TOKEN = os.environ.get("OCR_API_TOKEN", "")
 OCR_MODEL = os.environ.get("OCR_MODEL", "PaddleOCR-VL-1.6")
+OCR_TIMEOUT_SECONDS = int(os.environ.get("OCR_TIMEOUT_SECONDS", "600"))
 
 
-def ocr_arxiv_pdf(arxiv_url: str, output_dir: str = "output/ocr") -> dict:
+def ocr_arxiv_pdf(arxiv_url: str, output_dir: str = "output/ocr", download_images: bool = False) -> dict:
     """
     对 arxiv 论文 PDF 调用 PaddleOCR，返回 Markdown 文本和图片。
 
@@ -360,6 +373,9 @@ def ocr_arxiv_pdf(arxiv_url: str, output_dir: str = "output/ocr") -> dict:
     返回:
         {"markdown": "全文markdown文本", "pages": [{"md": "...", "images": {...}}], "pdf_url": "..."}
     """
+    if not OCR_API_TOKEN:
+        raise RuntimeError("OCR_API_TOKEN is not configured")
+
     # 解析 arxiv PDF URL
     arxiv_id = arxiv_url.strip()
     for prefix in ["https://arxiv.org/abs/", "http://arxiv.org/abs/", "arxiv.org/abs/"]:
@@ -367,7 +383,7 @@ def ocr_arxiv_pdf(arxiv_url: str, output_dir: str = "output/ocr") -> dict:
             arxiv_id = arxiv_id[len(prefix):]
             break
 
-    pdf_url = f"https://arxiv.org/pdf/{arxiv_id}.pdf"
+    pdf_url = f"https://arxiv.org/pdf/{arxiv_id}"
     print(f"[OCR] Processing PDF: {pdf_url}")
 
     headers = {"Authorization": f"bearer {OCR_API_TOKEN}"}
@@ -378,15 +394,25 @@ def ocr_arxiv_pdf(arxiv_url: str, output_dir: str = "output/ocr") -> dict:
         "useChartRecognition": True,  # 开启图表识别，提取实验结果
     }
 
-    # 提交 OCR job（URL 模式）
-    headers["Content-Type"] = "application/json"
-    payload = {
-        "fileUrl": pdf_url,
-        "model": OCR_MODEL,
-        "optionalPayload": optional_payload,
-    }
+    # PaddleOCR 对部分论文站点的远程 URL 抓取会得到非 PDF 内容，因此先下载校验再上传。
+    pdf_response = httpx.get(
+        pdf_url,
+        headers={"User-Agent": "ArxivDigest/1.0"},
+        follow_redirects=True,
+        timeout=60,
+    )
+    pdf_response.raise_for_status()
+    pdf_bytes = pdf_response.content
+    if not pdf_bytes.startswith(b"%PDF"):
+        content_type = pdf_response.headers.get("content-type", "unknown")
+        raise ValueError(f"arXiv did not return a PDF (content-type: {content_type})")
 
-    job_response = httpx.post(OCR_API_URL, json=payload, headers=headers, timeout=30)
+    form = {
+        "model": OCR_MODEL,
+        "optionalPayload": json.dumps(optional_payload),
+    }
+    files = {"file": (f"{arxiv_id.replace('/', '_')}.pdf", pdf_bytes, "application/pdf")}
+    job_response = httpx.post(OCR_API_URL, data=form, files=files, headers=headers, timeout=90)
     if job_response.status_code != 200:
         print(f"[OCR] Job submission failed: {job_response.status_code} {job_response.text}")
         return None
@@ -396,7 +422,8 @@ def ocr_arxiv_pdf(arxiv_url: str, output_dir: str = "output/ocr") -> dict:
 
     # 轮询结果
     jsonl_url = ""
-    while True:
+    deadline = time.monotonic() + OCR_TIMEOUT_SECONDS
+    while time.monotonic() < deadline:
         job_result = httpx.get(f"{OCR_API_URL}/{job_id}", headers=headers, timeout=15)
         if job_result.status_code != 200:
             print(f"[OCR] Poll failed: {job_result.status_code}")
@@ -425,8 +452,7 @@ def ocr_arxiv_pdf(arxiv_url: str, output_dir: str = "output/ocr") -> dict:
         time.sleep(5)
 
     if not jsonl_url:
-        print("[OCR] No result URL")
-        return None
+        raise TimeoutError(f"OCR job did not finish within {OCR_TIMEOUT_SECONDS} seconds")
 
     # 下载结果
     os.makedirs(output_dir, exist_ok=True)
@@ -438,33 +464,35 @@ def ocr_arxiv_pdf(arxiv_url: str, output_dir: str = "output/ocr") -> dict:
     all_markdown = []
     pages = []
 
-    for line_num, line in enumerate(lines):
+    page_index = 0
+    for line in lines:
         result = json.loads(line)["result"]
-        for i, res in enumerate(result["layoutParsingResults"]):
+        for res in result["layoutParsingResults"]:
             md_text = res["markdown"]["text"]
             all_markdown.append(md_text)
 
             page_data = {"md": md_text, "images": []}
 
             # 保存 Markdown
-            md_filename = os.path.join(output_dir, f"doc_{line_num}.md")
+            md_filename = os.path.join(output_dir, f"doc_{page_index}.md")
             with open(md_filename, "w", encoding="utf-8") as f:
                 f.write(md_text)
 
-            # 下载图片
-            for img_path, img_url in res["markdown"]["images"].items():
-                full_path = os.path.join(output_dir, img_path)
-                os.makedirs(os.path.dirname(full_path), exist_ok=True)
-                try:
-                    img_bytes = httpx.get(img_url, timeout=15).content
-                    with open(full_path, "wb") as f:
-                        f.write(img_bytes)
-                    page_data["images"].append(full_path)
-                except Exception as e:
-                    print(f"[OCR] Image download failed: {img_path}: {e}")
+            if download_images:
+                for img_path, img_url in res["markdown"]["images"].items():
+                    full_path = os.path.join(output_dir, img_path)
+                    os.makedirs(os.path.dirname(full_path), exist_ok=True)
+                    try:
+                        img_bytes = httpx.get(img_url, timeout=15).content
+                        with open(full_path, "wb") as f:
+                            f.write(img_bytes)
+                        page_data["images"].append(full_path)
+                    except Exception as e:
+                        print(f"[OCR] Image download failed: {img_path}: {e}")
 
             pages.append(page_data)
-            print(f"[OCR] Page {line_num} saved: {md_filename}")
+            print(f"[OCR] Page {page_index} saved: {md_filename}")
+            page_index += 1
 
     full_markdown = "\n\n".join(all_markdown)
     print(f"[OCR] Total: {len(pages)} pages, {len(full_markdown)} characters")
@@ -487,77 +515,42 @@ def extract_experiment_section(ocr_result: dict) -> str:
 
     md = ocr_result["markdown"]
 
-    # 常见实验部分标题
-    experiment_headers = [
-        "Experiment", "Experiments", "Experimental",
-        "Results", "Evaluation", "Evaluations",
-        "实验", "结果", "评估",
-        "Main Results", "Ablation",
-    ]
-
-    lines = md.split("\n")
-    found_sections = []
-    in_section = False
-    current_section = []
-
-    for line in lines:
+    def heading_title(line: str) -> str:
         stripped = line.strip()
-        # 检测是否为标题行
-        is_header = False
-        for h in experiment_headers:
-            if stripped.lower().startswith(h.lower()) and len(stripped) < 100:
-                is_header = True
-                if current_section:
-                    found_sections.append("\n".join(current_section))
-                current_section = [line]
-                in_section = True
-                break
+        if len(stripped) > 120:
+            return ""
+        is_markdown = stripped.startswith("#")
+        is_numbered = bool(re.match(r"^\d+(?:\.\d+)*[.)]?\s+", stripped))
+        if not (is_markdown or is_numbered):
+            return ""
+        title = re.sub(r"^#+\s*", "", stripped)
+        title = re.sub(r"^\d+(?:\.\d+)*[.)]?\s*", "", title)
+        return title.casefold()
 
-        if not is_header and in_section:
-            # 检测是否到了下一节（简单的启发式：短行 + 首字母大写 或 数字开头）
-            if stripped and len(stripped) < 80 and (
-                stripped[0].isupper() or stripped[0].isdigit()
-            ) and not stripped.startswith(("Table", "Figure", "Fig", "|")):
-                # 可能是新章节标题
-                if any(h.lower() in stripped.lower() for h in [
-                    "conclusion", "related work", "introduction", "abstract",
-                    "method", "approach", "background", "preliminar",
-                    "reference", "appendix", "discussion", "limitation",
-                    "结论", "相关工作", "引言", "方法", "背景",
-                ]):
-                    found_sections.append("\n".join(current_section))
-                    current_section = []
-                    in_section = False
-                else:
-                    current_section.append(line)
-            else:
-                current_section.append(line)
+    start_terms = ("experiment", "evaluation", "main result", "empirical", "实验", "评估", "主要结果")
+    stop_terms = ("conclusion", "related work", "reference", "appendix", "discussion", "limitation", "结论", "相关工作", "参考文献", "附录", "局限")
+    lines = md.splitlines()
+    selected = []
+    in_section = False
+    for line in lines:
+        title = heading_title(line)
+        if not in_section and title and any(term in title for term in start_terms):
+            in_section = True
+        elif in_section and title and any(title.startswith(term) for term in stop_terms):
+            break
+        if in_section:
+            selected.append(line)
 
-    if current_section:
-        found_sections.append("\n".join(current_section))
+    result = "\n".join(selected).strip()
 
-    result = "\n\n".join(found_sections)
-
-    # 如果太长，截取前 8000 字符
-    if len(result) > 8000:
-        result = result[:8000] + "\n\n[... truncated ...]"
+    if len(result) > 12000:
+        result = result[:12000] + "\n\n[... truncated ...]"
 
     if not result:
         # Fallback：返回后 40% 的内容（实验通常在后面）
-        result = md[len(md)//2:][:8000]
+        result = md[len(md)//2:][:12000]
 
     return result
-
-
-# ─── Feishu Event Signature Verification ──────────────────────────────────────
-
-def verify_feishu_signature(timestamp: str, nonce: str, body: str, signing_key: str) -> bool:
-    """验证飞书事件订阅签名。用于 Cloudflare Worker 端。"""
-    sign_str = f"{timestamp}\n{nonce}\n{body}"
-    expected = base64.b64encode(
-        hmac.new(signing_key.encode(), sign_str.encode(), hashlib.sha256).digest()
-    ).decode()
-    return True  # Worker 端实现，Python 端仅做参考
 
 
 # ─── Misc ─────────────────────────────────────────────────────────────────────
