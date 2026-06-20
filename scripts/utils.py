@@ -1,12 +1,14 @@
 """
-共享工具模块：LLM 客户端、飞书 API、arxiv 辅助函数、PaddleOCR。
+共享工具模块：LLM 客户端、飞书 API、arxiv 辅助函数、MinerU OCR。
 """
 
 import os
 import sys
+import io
 import json
 import time
 import re
+import zipfile
 import urllib.request
 import urllib.parse
 import xml.etree.ElementTree as ET
@@ -222,10 +224,15 @@ def build_digest_card(papers: list[dict]) -> dict:
 
         # 操作按钮
         issue_title = paper["title"][:80]
-        issue_body = f"arxiv: {paper['abstract_url']}\n\n> {paper['digest_cn']}\n\n---\n点击 Submit 触发精读分析"
-        issue_url = (
+        issue_body = f"arxiv: {paper['abstract_url']}\n\n> {paper['digest_cn']}\n\n---\n点击 Submit 触发分析"
+        reading_issue_url = (
             f"https://github.com/Estrellajer/arxiv-digest/issues/new"
             f"?title={urllib.parse.quote('[精读] ' + issue_title)}"
+            f"&body={urllib.parse.quote(issue_body)}"
+        )
+        setup_issue_url = (
+            f"https://github.com/Estrellajer/arxiv-digest/issues/new"
+            f"?title={urllib.parse.quote('[实验配置] ' + issue_title)}"
             f"&body={urllib.parse.quote(issue_body)}"
         )
 
@@ -236,7 +243,13 @@ def build_digest_card(papers: list[dict]) -> dict:
                     "tag": "button",
                     "text": {"tag": "plain_text", "content": "📖 精读"},
                     "type": "primary",
-                    "url": issue_url,
+                    "url": reading_issue_url,
+                },
+                {
+                    "tag": "button",
+                    "text": {"tag": "plain_text", "content": "🔬 实验配置"},
+                    "type": "default",
+                    "url": setup_issue_url,
                 },
                 {
                     "tag": "button",
@@ -354,154 +367,292 @@ def build_reading_result_card(analysis: dict) -> dict:
     }
 
 
-# ─── PaddleOCR ─────────────────────────────────────────────────────────────────
+def build_setup_result_card(setup: dict) -> dict:
+    """构建 experiment-setup 实验配置抽取结果的飞书卡片。"""
+    title = setup.get("title", "Unknown")
 
-OCR_API_URL = "https://paddleocr.aistudio-app.com/api/v2/ocr/jobs"
-OCR_API_TOKEN = os.environ.get("OCR_API_TOKEN", "")
-OCR_MODEL = os.environ.get("OCR_MODEL", "PaddleOCR-VL-1.6")
+    datasets = "\n".join(
+        f"- {d.get('name', '未知')}｜划分：{d.get('split', '未知')}｜规模：{d.get('size', '未知')}"
+        for d in (setup.get("datasets") or [])[:5]
+    ) or "未知"
+
+    model = setup.get("model", {}) or {}
+    model_text = (
+        f"{model.get('name', '未知')}｜架构：{model.get('architecture', '未知')}"
+        f"｜参数量：{model.get('params', '未知')}｜权重：{model.get('init_weights', '未知')}"
+    )
+
+    hp = setup.get("hyperparameters", {}) or {}
+    hp_text = (
+        f"lr：{hp.get('learning_rate', '未知')}｜batch：{hp.get('batch_size', '未知')}"
+        f"｜轮数/步数：{hp.get('epochs_or_steps', '未知')}｜优化器：{hp.get('optimizer', '未知')}"
+        f"｜调度：{hp.get('scheduler', '未知')}｜其它：{hp.get('other', '未知')}"
+    )
+
+    hw = setup.get("hardware", {}) or {}
+    hw_text = (
+        f"{hw.get('accelerator', '未知')} × {hw.get('count', '未知')}"
+        f"｜时长：{hw.get('training_time', '未知')}｜成本：{hw.get('cost', '未知')}"
+    )
+
+    ev = setup.get("evaluation", {}) or {}
+    metrics = "、".join(ev.get("metrics", []) or []) or "未知"
+    eval_text = (
+        f"指标：{metrics}｜协议：{ev.get('protocol', '未知')}"
+        f"｜few-shot：{ev.get('few_shot', '未知')}｜温度：{ev.get('temperature', '未知')}"
+        f"｜解码：{ev.get('decoding', '未知')}｜种子：{ev.get('seeds', '未知')}"
+    )
+
+    ablations = "\n".join(
+        f"- {a.get('setting', '未知')} → {a.get('finding', '未知')}"
+        for a in (setup.get("ablations") or [])[:4]
+    ) or "未知"
+
+    repro = setup.get("reproducibility", {}) or {}
+    code_flag = {"true": "✅", "false": "❌", "unknown": "❓"}.get(str(repro.get("code_available", "unknown")), "❓")
+    code_url = repro.get("code_url", "未知")
+    key_points = "；".join(repro.get("key_to_reproduce", []) or []) or "未知"
+    missing = "；".join(repro.get("missing_details", []) or []) or "未知"
+    repro_text = (
+        f"代码：{code_flag} {code_url}｜数据：{repro.get('data_available', 'unknown')}"
+        f"｜权重：{repro.get('checkpoints', '未知')}\n"
+        f"**复现要点**：{key_points}\n**缺口**：{missing}"
+    )
+
+    elements = [
+        {"tag": "markdown", "content": f"**🔬 实验配置 — {title[:80]}**\n输入：{setup.get('input_coverage', '未知')}"},
+        {"tag": "hr"},
+        {"tag": "markdown", "content": f"**数据集**\n{datasets}"},
+        {"tag": "hr"},
+        {"tag": "markdown", "content": f"**模型**：{model_text}\n**超参**：{hp_text}\n**硬件**：{hw_text}"},
+        {"tag": "hr"},
+        {"tag": "markdown", "content": f"**评测**：{eval_text}"},
+        {"tag": "hr"},
+        {"tag": "markdown", "content": f"**消融**\n{ablations}"},
+        {"tag": "hr"},
+        {"tag": "markdown", "content": f"**复现性**\n{repro_text}"},
+    ]
+
+    return {
+        "header": {
+            "title": {"tag": "plain_text", "content": "🔬 实验配置抽取"},
+            "template": "turquoise",
+        },
+        "elements": elements,
+    }
+
+
+# ─── MinerU OCR ─────────────────────────────────────────────────────────────
+
+# MinerU 提供两条解析路径，都把 arXiv PDF 链接交给服务端远程下载并解析，本地 / CI 不下载 PDF：
+#   1) 精准解析 API（v4，需 Token）：vlm 模型，质量更高，每账号每天 1000 页高优先级额度。
+#   2) Agent 轻量解析 API（v1，免登录、IP 限频）：作为兜底，无 Token 时也能用。
+# 配置了 MINERU_TOKEN 则优先精准解析，失败自动回退 Agent 轻量解析。
+MINERU_TOKEN = os.environ.get("MINERU_TOKEN", "")
+MINERU_MODEL_VERSION = os.environ.get("MINERU_MODEL_VERSION", "vlm")
+MINERU_PRECISION_URL = os.environ.get("MINERU_PRECISION_URL", "https://mineru.net/api/v4/extract/task")
+MINERU_AGENT_URL = os.environ.get("MINERU_AGENT_URL", "https://mineru.net/api/v1/agent/parse/url")
+MINERU_AGENT_QUERY_URL = os.environ.get("MINERU_AGENT_QUERY_URL", "https://mineru.net/api/v1/agent/parse")
+# 只解析前 N 页：论文正文通常 <=20 页，之后多为补充材料；也正好是轻量 API 的页数上限。
+OCR_PAGE_LIMIT = int(os.environ.get("OCR_PAGE_LIMIT", "20"))
+OCR_LANGUAGE = os.environ.get("OCR_LANGUAGE", "en")
 OCR_TIMEOUT_SECONDS = int(os.environ.get("OCR_TIMEOUT_SECONDS", "600"))
+
+
+def _normalize_arxiv_pdf_url(arxiv_url: str) -> tuple[str, str]:
+    """接受 abs / pdf / 纯 ID 输入，统一归一化为 (arxiv_id, pdf_url)。"""
+    arxiv_id = arxiv_url.strip()
+    for prefix in (
+        "https://arxiv.org/abs/", "http://arxiv.org/abs/", "arxiv.org/abs/",
+        "https://arxiv.org/pdf/", "http://arxiv.org/pdf/", "arxiv.org/pdf/",
+    ):
+        if arxiv_id.startswith(prefix):
+            arxiv_id = arxiv_id[len(prefix):]
+            break
+    if arxiv_id.lower().endswith(".pdf"):
+        arxiv_id = arxiv_id[:-4]
+    arxiv_id = arxiv_id.rstrip("/")
+    return arxiv_id, f"https://arxiv.org/pdf/{arxiv_id}"
+
+
+def _markdown_from_zip(zip_url: str) -> Optional[str]:
+    """从精准解析结果 ZIP（CDN 链接）中取出 full.md 文本。"""
+    resp = httpx.get(zip_url, timeout=120, follow_redirects=True)
+    resp.raise_for_status()
+    with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
+        md_name = next((n for n in zf.namelist() if n.endswith("full.md")), None)
+        if not md_name:
+            print("[OCR] full.md not found in result zip")
+            return None
+        return zf.read(md_name).decode("utf-8", errors="replace")
+
+
+def _mineru_precision_parse(pdf_url: str, arxiv_id: str) -> Optional[str]:
+    """精准解析 API（v4，需 Token）。返回 Markdown 文本，失败返回 None 以便回退。"""
+    if not MINERU_TOKEN:
+        return None
+
+    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {MINERU_TOKEN}"}
+    payload = {
+        "url": pdf_url,
+        "model_version": MINERU_MODEL_VERSION,
+        "page_ranges": f"1-{OCR_PAGE_LIMIT}",
+        "is_ocr": False,
+        "enable_formula": False,
+        "enable_table": True,
+        "language": OCR_LANGUAGE,
+        "data_id": arxiv_id.replace("/", "_"),
+    }
+    submit = httpx.post(MINERU_PRECISION_URL, json=payload, headers=headers, timeout=60)
+    if submit.status_code != 200:
+        print(f"[OCR] Precision submit failed: {submit.status_code} {submit.text[:200]}")
+        return None
+    body = submit.json()
+    if body.get("code") != 0:
+        print(f"[OCR] Precision rejected: code={body.get('code')} msg={body.get('msg')}")
+        return None
+    task_id = (body.get("data") or {}).get("task_id")
+    if not task_id:
+        print("[OCR] Precision response missing task_id")
+        return None
+    print(f"[OCR] Precision task submitted: {task_id}")
+
+    zip_url = ""
+    deadline = time.monotonic() + OCR_TIMEOUT_SECONDS
+    while time.monotonic() < deadline:
+        poll = httpx.get(f"{MINERU_PRECISION_URL}/{task_id}", headers=headers, timeout=30)
+        if poll.status_code != 200:
+            print(f"[OCR] Precision poll failed: {poll.status_code}")
+            time.sleep(5)
+            continue
+        data = poll.json().get("data") or {}
+        state = data.get("state", "")
+        if state == "done":
+            zip_url = data.get("full_zip_url") or ""
+            print("[OCR] Precision done")
+            break
+        if state == "failed":
+            print(f"[OCR] Precision failed: {data.get('err_msg', 'unknown')}")
+            return None
+        prog = data.get("extract_progress", {}) or {}
+        print(f"[OCR] Precision {state or 'pending'}: {prog.get('extracted_pages', '?')}/{prog.get('total_pages', '?')}")
+        time.sleep(5)
+
+    if not zip_url:
+        print(f"[OCR] Precision did not finish within {OCR_TIMEOUT_SECONDS} seconds")
+        return None
+    return _markdown_from_zip(zip_url)
+
+
+def _mineru_agent_parse(pdf_url: str, arxiv_id: str) -> Optional[str]:
+    """Agent 轻量解析 API（v1，免登录）。返回 Markdown 文本，失败返回 None。"""
+    payload = {
+        "url": pdf_url,
+        "file_name": f"{arxiv_id.replace('/', '_')}.pdf",
+        "language": OCR_LANGUAGE,
+        "page_range": f"1-{OCR_PAGE_LIMIT}",
+        "enable_table": True,
+        "is_ocr": False,
+        "enable_formula": False,
+    }
+    submit = httpx.post(MINERU_AGENT_URL, json=payload, timeout=60)
+    if submit.status_code == 429:
+        print("[OCR] Agent rate limited (HTTP 429)")
+        return None
+    if submit.status_code != 200:
+        print(f"[OCR] Agent submit failed: {submit.status_code} {submit.text[:200]}")
+        return None
+    body = submit.json()
+    if body.get("code") != 0:
+        print(f"[OCR] Agent rejected: code={body.get('code')} msg={body.get('msg')}")
+        return None
+    task_id = (body.get("data") or {}).get("task_id")
+    if not task_id:
+        print("[OCR] Agent response missing task_id")
+        return None
+    print(f"[OCR] Agent task submitted: {task_id}")
+
+    markdown_url = ""
+    deadline = time.monotonic() + OCR_TIMEOUT_SECONDS
+    while time.monotonic() < deadline:
+        poll = httpx.get(f"{MINERU_AGENT_QUERY_URL}/{task_id}", timeout=30)
+        if poll.status_code != 200:
+            print(f"[OCR] Agent poll failed: {poll.status_code}")
+            time.sleep(5)
+            continue
+        data = poll.json().get("data") or {}
+        state = data.get("state", "")
+        if state == "done":
+            markdown_url = data.get("markdown_url") or data.get("markdownUrl") or ""
+            print("[OCR] Agent done")
+            break
+        if state == "failed":
+            print(f"[OCR] Agent failed: {data.get('err_msg') or data.get('error_msg', 'unknown')}")
+            return None
+        print(f"[OCR] Agent {state or 'pending'}...")
+        time.sleep(5)
+
+    if not markdown_url:
+        print(f"[OCR] Agent did not finish within {OCR_TIMEOUT_SECONDS} seconds")
+        return None
+
+    md_resp = httpx.get(markdown_url, timeout=60)
+    md_resp.raise_for_status()
+    return md_resp.text
 
 
 def ocr_arxiv_pdf(arxiv_url: str, output_dir: str = "output/ocr", download_images: bool = False) -> dict:
     """
-    对 arxiv 论文 PDF 调用 PaddleOCR，返回 Markdown 文本和图片。
+    通过 MinerU 解析 arxiv 论文 PDF，返回 Markdown 文本。
+
+    设计要点：
+    - 直接把 arXiv PDF 链接交给 MinerU，由服务端远程下载并解析，本地 / CI 不下载 PDF。
+    - 仅解析前 OCR_PAGE_LIMIT 页（默认 20）。
+    - 优先精准解析 API（需 MINERU_TOKEN，vlm 模型），失败自动回退 Agent 轻量解析 API（免登录）。
 
     参数:
-        arxiv_url: arxiv 论文链接 (如 https://arxiv.org/abs/2210.03629)
-        output_dir: 输出目录
+        arxiv_url: arxiv 链接或 ID（abs / pdf / 纯 ID 均可）
+        output_dir: 结果 Markdown 的输出目录
+        download_images: 兼容旧签名；当前实现只取文本，此参数不再使用
 
     返回:
-        {"markdown": "全文markdown文本", "pages": [{"md": "...", "images": {...}}], "pdf_url": "..."}
+        {"markdown": "全文markdown文本", "pages": [{"md": "...", "images": []}], "pdf_url": "...", "arxiv_id": "...", "ocr_source": "precision|agent"}
     """
-    if not OCR_API_TOKEN:
-        raise RuntimeError("OCR_API_TOKEN is not configured")
+    arxiv_id, pdf_url = _normalize_arxiv_pdf_url(arxiv_url)
 
-    # 解析 arxiv PDF URL
-    arxiv_id = arxiv_url.strip()
-    for prefix in ["https://arxiv.org/abs/", "http://arxiv.org/abs/", "arxiv.org/abs/"]:
-        if arxiv_id.startswith(prefix):
-            arxiv_id = arxiv_id[len(prefix):]
-            break
+    markdown = None
+    source = ""
+    if MINERU_TOKEN:
+        print(f"[OCR] MinerU precision parsing: {pdf_url} (pages 1-{OCR_PAGE_LIMIT}, model={MINERU_MODEL_VERSION})")
+        markdown = _mineru_precision_parse(pdf_url, arxiv_id)
+        if markdown is not None:
+            source = "precision"
+        else:
+            print("[OCR] Precision parse failed; falling back to Agent lightweight API")
 
-    pdf_url = f"https://arxiv.org/pdf/{arxiv_id}"
-    print(f"[OCR] Processing PDF: {pdf_url}")
+    if markdown is None:
+        print(f"[OCR] MinerU agent parsing: {pdf_url} (pages 1-{OCR_PAGE_LIMIT})")
+        markdown = _mineru_agent_parse(pdf_url, arxiv_id)
+        if markdown is not None:
+            source = "agent"
 
-    headers = {"Authorization": f"bearer {OCR_API_TOKEN}"}
-
-    optional_payload = {
-        "useDocOrientationClassify": False,
-        "useDocUnwarping": False,
-        "useChartRecognition": True,  # 开启图表识别，提取实验结果
-    }
-
-    # PaddleOCR 对部分论文站点的远程 URL 抓取会得到非 PDF 内容，因此先下载校验再上传。
-    pdf_response = httpx.get(
-        pdf_url,
-        headers={"User-Agent": "ArxivDigest/1.0"},
-        follow_redirects=True,
-        timeout=60,
-    )
-    pdf_response.raise_for_status()
-    pdf_bytes = pdf_response.content
-    if not pdf_bytes.startswith(b"%PDF"):
-        content_type = pdf_response.headers.get("content-type", "unknown")
-        raise ValueError(f"arXiv did not return a PDF (content-type: {content_type})")
-
-    form = {
-        "model": OCR_MODEL,
-        "optionalPayload": json.dumps(optional_payload),
-    }
-    files = {"file": (f"{arxiv_id.replace('/', '_')}.pdf", pdf_bytes, "application/pdf")}
-    job_response = httpx.post(OCR_API_URL, data=form, files=files, headers=headers, timeout=90)
-    if job_response.status_code != 200:
-        print(f"[OCR] Job submission failed: {job_response.status_code} {job_response.text}")
+    if markdown is None:
+        print("[OCR] All MinerU parse paths failed")
         return None
 
-    job_id = job_response.json()["data"]["jobId"]
-    print(f"[OCR] Job submitted: {job_id}")
-
-    # 轮询结果
-    jsonl_url = ""
-    deadline = time.monotonic() + OCR_TIMEOUT_SECONDS
-    while time.monotonic() < deadline:
-        job_result = httpx.get(f"{OCR_API_URL}/{job_id}", headers=headers, timeout=15)
-        if job_result.status_code != 200:
-            print(f"[OCR] Poll failed: {job_result.status_code}")
-            time.sleep(5)
-            continue
-
-        state = job_result.json()["data"]["state"]
-        if state == "pending":
-            print("[OCR] Pending...")
-        elif state == "running":
-            try:
-                progress = job_result.json()["data"]["extractProgress"]
-                print(f"[OCR] Running: {progress.get('extractedPages', 0)}/{progress.get('totalPages', '?')} pages")
-            except KeyError:
-                print("[OCR] Running...")
-        elif state == "done":
-            progress = job_result.json()["data"]["extractProgress"]
-            print(f"[OCR] Done: {progress['extractedPages']} pages extracted")
-            jsonl_url = job_result.json()["data"]["resultUrl"]["jsonUrl"]
-            break
-        elif state == "failed":
-            error = job_result.json()["data"].get("errorMsg", "unknown")
-            print(f"[OCR] Failed: {error}")
-            return None
-
-        time.sleep(5)
-
-    if not jsonl_url:
-        raise TimeoutError(f"OCR job did not finish within {OCR_TIMEOUT_SECONDS} seconds")
-
-    # 下载结果
     os.makedirs(output_dir, exist_ok=True)
-    jsonl_resp = httpx.get(jsonl_url, timeout=30)
-    jsonl_resp.raise_for_status()
+    md_path = os.path.join(output_dir, "doc.md")
+    with open(md_path, "w", encoding="utf-8") as f:
+        f.write(markdown)
+    print(f"[OCR] Saved markdown via {source}: {md_path} ({len(markdown)} characters)")
 
-    lines = [l.strip() for l in jsonl_resp.text.split("\n") if l.strip()]
-
-    all_markdown = []
-    pages = []
-
-    page_index = 0
-    for line in lines:
-        result = json.loads(line)["result"]
-        for res in result["layoutParsingResults"]:
-            md_text = res["markdown"]["text"]
-            all_markdown.append(md_text)
-
-            page_data = {"md": md_text, "images": []}
-
-            # 保存 Markdown
-            md_filename = os.path.join(output_dir, f"doc_{page_index}.md")
-            with open(md_filename, "w", encoding="utf-8") as f:
-                f.write(md_text)
-
-            if download_images:
-                for img_path, img_url in res["markdown"]["images"].items():
-                    full_path = os.path.join(output_dir, img_path)
-                    os.makedirs(os.path.dirname(full_path), exist_ok=True)
-                    try:
-                        img_bytes = httpx.get(img_url, timeout=15).content
-                        with open(full_path, "wb") as f:
-                            f.write(img_bytes)
-                        page_data["images"].append(full_path)
-                    except Exception as e:
-                        print(f"[OCR] Image download failed: {img_path}: {e}")
-
-            pages.append(page_data)
-            print(f"[OCR] Page {page_index} saved: {md_filename}")
-            page_index += 1
-
-    full_markdown = "\n\n".join(all_markdown)
-    print(f"[OCR] Total: {len(pages)} pages, {len(full_markdown)} characters")
-
+    # MinerU 返回整篇 Markdown，不分页；以单页形式回传以兼容下游 build_ocr_evidence。
     return {
-        "markdown": full_markdown,
-        "pages": pages,
+        "markdown": markdown,
+        "pages": [{"md": markdown, "images": []}],
         "pdf_url": pdf_url,
         "arxiv_id": arxiv_id,
+        "ocr_source": source,
     }
 
 

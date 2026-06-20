@@ -9,6 +9,7 @@ LLM 驱动的 arxiv 论文筛选 + 速递 + 精读系统。推送到飞书。
 | **paper-feishu-digest** | 摘要预筛 → 候选 OCR → 机构/代码/实验决策卡 | 每日定时 (GitHub Actions) |
 | **paper-reading** | OCR 首页与实验提取 + 快速理解式精读 | 飞书按钮 → GitHub Issue → Actions |
 | **paper-deep-note** | 结构化精读卡（Obsidian 格式） | paper-reading 判定「值得精读」自动触发 |
+| **experiment-setup** | 单篇论文实验配置/复现要素抽取（数据集/超参/硬件/评测/消融/复现性） | 飞书「实验配置」按钮 → GitHub Issue → Actions |
 | **benchmark-extractor** | 多篇论文实验表抽取 | workflow_dispatch 手动触发 |
 
 ## 快速开始
@@ -30,7 +31,12 @@ LLM 驱动的 arxiv 论文筛选 + 速递 + 精读系统。推送到飞书。
 | `FEISHU_APP_SECRET` | 发送精读结果的飞书应用 App Secret |
 | `FEISHU_RECEIVE_ID` | 精读结果目标群的 `chat_id`（或用户 ID） |
 | `FEISHU_RECEIVE_ID_TYPE` | 可选，默认 `chat_id`；私聊可设为 `open_id` |
-| `OCR_API_TOKEN` | PaddleOCR API Token |
+| `MINERU_TOKEN` | 可选，[MinerU](https://mineru.net) 精准解析 API Token（API 管理页创建） |
+
+OCR 使用 [MinerU](https://mineru.net)，直接提交 arXiv PDF 链接由服务端下载解析，**本地与 GitHub Actions 都不会下载 PDF**，仅解析前 20 页（`OCR_PAGE_LIMIT` 可调），正文之后通常为补充材料。两条路径互为兜底：
+
+- **精准解析 API（v4）**：配置 `MINERU_TOKEN` 时优先使用，`vlm` 模型质量更高，每账号每天 1000 页高优先级额度。
+- **Agent 轻量解析 API（v1）**：免登录、IP 限频，作为兜底；未配置 Token 或精准解析失败时自动回退。
 
 飞书应用需要开通发送消息权限。私聊时设置 `FEISHU_RECEIVE_ID_TYPE=open_id`，无需加入群。仓库 workflow 已声明 `issues: write`，用于回写并关闭精读 Issue。
 

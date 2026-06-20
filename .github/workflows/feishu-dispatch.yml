@@ -1,0 +1,52 @@
+name: Feishu Arxiv Dispatch
+
+# 由飞书 webhook（Cloudflare Worker）通过 GitHub repository_dispatch 触发：
+# 用户在飞书发送 arxiv 链接 → Worker 解析 → 这里跑 OCR + 抽取 → 结果卡片推回原会话。
+
+on:
+  repository_dispatch:
+    types: [arxiv-paper]
+
+permissions:
+  contents: read
+
+jobs:
+  process:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run analysis and push to Feishu
+        env:
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          LLM_BASE_URL: ${{ secrets.LLM_BASE_URL }}
+          LLM_MODEL: ${{ secrets.LLM_MODEL }}
+          FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
+          FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
+          # 把结果推回发消息的那个会话（群或私聊都用 chat_id）
+          FEISHU_RECEIVE_ID: ${{ github.event.client_payload.chat_id }}
+          FEISHU_RECEIVE_ID_TYPE: chat_id
+          MINERU_TOKEN: ${{ secrets.MINERU_TOKEN }}
+          # 用 env 接收 payload，避免直接插值带来的命令注入
+          PAPER_URL: ${{ github.event.client_payload.url }}
+          PAPER_TASK: ${{ github.event.client_payload.task }}
+        run: |
+          if [ -z "$PAPER_URL" ]; then
+            echo "No arxiv URL in dispatch payload"
+            exit 1
+          fi
+          echo "Task=$PAPER_TASK URL=$PAPER_URL"
+          if [ "$PAPER_TASK" = "reading" ]; then
+            python scripts/reading.py --url "$PAPER_URL" --use-ocr --push-to-feishu
+          else
+            python scripts/extract_setup.py --url "$PAPER_URL" --push-to-feishu
+          fi

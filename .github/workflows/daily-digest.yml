@@ -40,7 +40,7 @@ jobs:
           LLM_BASE_URL: ${{ secrets.LLM_BASE_URL }}
           LLM_MODEL: ${{ secrets.LLM_MODEL }}
           FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
-          OCR_API_TOKEN: ${{ secrets.OCR_API_TOKEN }}
+          MINERU_TOKEN: ${{ secrets.MINERU_TOKEN }}
         run: |
           python scripts/digest.py \
             --categories "${{ github.event.inputs.categories || 'cs.CL,cs.AI,cs.LG' }}" \

@@ -1,0 +1,14 @@
+name = "arxiv-feishu-bot"
+main = "worker.js"
+compatibility_date = "2024-11-01"
+
+[vars]
+# 目标仓库，形如 "owner/repo"
+GITHUB_REPO = "Estrellajer/arxiv-digest"
+
+# 以下通过 `wrangler secret put <NAME>` 设置，不要写进本文件：
+#   GITHUB_TOKEN               必填：具备 repository_dispatch 权限的 token
+#   FEISHU_VERIFICATION_TOKEN  可选：事件订阅 Verification Token（校验来源）
+#   FEISHU_ENCRYPT_KEY         可选：开启事件加密时填
+#   FEISHU_APP_ID              可选：填了则发送「正在解析…」即时回执
+#   FEISHU_APP_SECRET          可选：同上

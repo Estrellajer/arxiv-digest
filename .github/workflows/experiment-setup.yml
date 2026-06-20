@@ -1,4 +1,4 @@
-name: Paper Analysis (Issue Trigger)
+name: Experiment Setup Extraction (Issue Trigger)
 
 on:
   issues:
@@ -16,11 +16,11 @@ permissions:
   issues: write
 
 jobs:
-  analyze:
+  extract:
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    # 只处理标题包含 [精读] 的 Issue
-    if: contains(github.event.issue.title, '[精读]') || github.event_name == 'workflow_dispatch'
+    # 只处理标题包含 [实验配置] 的 Issue
+    if: contains(github.event.issue.title, '[实验配置]') || github.event_name == 'workflow_dispatch'
 
     steps:
       - uses: actions/checkout@v4
@@ -39,7 +39,6 @@ jobs:
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             echo "url=${{ github.event.inputs.arxiv_url }}" >> $GITHUB_OUTPUT
           else
-            # 从 Issue body 中提取 arxiv URL
             BODY="${{ github.event.issue.body }}"
             URL=$(echo "$BODY" | grep -oP 'https://arxiv\.org/abs/\S+' | head -1)
             if [ -z "$URL" ]; then
@@ -56,8 +55,8 @@ jobs:
             echo "issue_number=${{ github.event.issue.number }}" >> $GITHUB_OUTPUT
           fi
 
-      - name: Run paper-reading
-        id: reading
+      - name: Run experiment-setup extraction
+        id: setup
         env:
           LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
           LLM_BASE_URL: ${{ secrets.LLM_BASE_URL }}
@@ -68,42 +67,28 @@ jobs:
           FEISHU_RECEIVE_ID_TYPE: ${{ secrets.FEISHU_RECEIVE_ID_TYPE }}
           MINERU_TOKEN: ${{ secrets.MINERU_TOKEN }}
         run: |
-          python scripts/reading.py --url "${{ steps.paper.outputs.url }}" --use-ocr --push-to-feishu 2>&1 | tee reading_output.txt
-
-      - name: Extract analysis JSON
-        id: extract
-        run: |
-          if [ -f output/analysis.json ]; then
-            cp output/analysis.json analysis.json
-            python -c "import json; d=json.load(open('analysis.json')); print(f'Verdict: {d.get(\"verdict\",\"?\")}'); print(f'Priority: {d.get(\"reading_priority\",\"?\")}')"
-          else
-            echo "No analysis JSON found"
-            exit 1
-          fi
+          python scripts/extract_setup.py --url "${{ steps.paper.outputs.url }}" --push-to-feishu 2>&1 | tee setup_output.txt
 
       - name: Post comment on issue
         if: steps.paper.outputs.issue_number != ''
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          PRIORITY=$(python -c "import json; d=json.load(open('analysis.json')); print(d.get('reading_priority','可暂缓'))")
-          SUMMARY=$(python -c "import json; d=json.load(open('analysis.json')); print(d.get('quick_take','未知')[:300])")
-          QUESTION=$(python -c "import json; d=json.load(open('analysis.json')); print(d.get('research_question','未知')[:200])")
-          REASON=$(python -c "import json; d=json.load(open('analysis.json')); print(d.get('priority_reason','未知')[:200])")
+          COVERAGE=$(python -c "import json; d=json.load(open('output/setup.json')); print(d.get('input_coverage','未知'))")
+          MODEL=$(python -c "import json; d=json.load(open('output/setup.json')); m=d.get('model',{}); print(m.get('name','未知'))")
+          CODE=$(python -c "import json; d=json.load(open('output/setup.json')); print(d.get('reproducibility',{}).get('code_url','未知'))")
 
           COMMENT=$(cat <<EOF
-          ## 📖 精读分析完成
+          ## 🔬 实验配置抽取完成
 
-          **30 秒理解**: ${SUMMARY}
+          **分析输入**: ${COVERAGE}
 
-          **研究问题**: ${QUESTION}
+          **模型**: ${MODEL}
 
-          **推荐理由**: ${REASON}
-
-          **阅读优先级**: ${PRIORITY}
+          **代码**: ${CODE}
 
           ---
-          完整结果已通过飞书应用私聊推送。
+          完整实验配置已通过飞书应用私聊推送。
           EOF
           )
 
@@ -116,29 +101,13 @@ jobs:
         run: |
           gh issue close ${{ steps.paper.outputs.issue_number }} --reason "completed"
 
-      - name: Run deep-note (if worth it)
-        env:
-          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
-          LLM_BASE_URL: ${{ secrets.LLM_BASE_URL }}
-          LLM_MODEL: ${{ secrets.LLM_MODEL }}
-        run: |
-          PRIORITY=$(python -c "import json; d=json.load(open('analysis.json')); print(d.get('reading_priority','可暂缓'))")
-          if [ "$PRIORITY" = "值得精读" ]; then
-            echo "📝 Generating deep note..."
-            python scripts/deep_note.py --from-reading analysis.json
-          else
-            echo "Skipping deep note (priority: $PRIORITY)"
-          fi
-
-      - name: Upload reading evidence
+      - name: Upload setup evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: paper-reading-evidence
+          name: experiment-setup-evidence
           path: |
-            analysis.json
-            output/analysis.json
+            output/setup.json
             output/ocr/**/*.md
-            output/*_deepnote.md
           if-no-files-found: ignore
           retention-days: 14
