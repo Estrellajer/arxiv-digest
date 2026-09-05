@@ -41,6 +41,7 @@ jobs:
           LLM_MODEL: ${{ secrets.LLM_MODEL }}
           FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
           MINERU_TOKEN: ${{ secrets.MINERU_TOKEN }}
+          ARXIV_USER_AGENT: "arxiv-digest/1.0 (+https://github.com/${{ github.repository }})"
         run: |
           python scripts/digest.py \
             --categories "${{ github.event.inputs.categories || 'cs.CL,cs.AI,cs.LG' }}" \

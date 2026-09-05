@@ -16,6 +16,7 @@ import os
 import sys
 import json
 import argparse
+import re
 import urllib.request
 import xml.etree.ElementTree as ET
 
@@ -24,14 +25,54 @@ from utils import (
     llm_chat, get_llm_model,
     send_feishu_message, build_reading_result_card,
     ocr_arxiv_pdf, extract_experiment_section,
+    robust_arxiv_request,
 )
 from paper_context import build_ocr_evidence, load_prompt
 
 
 # ─── Arxiv Paper Fetcher (single paper) ──────────────────────────────────────
 
+def fetch_single_paper_from_abs(arxiv_id: str) -> dict:
+    """从 arxiv.org/abs/{arxiv_id} 静态 HTML 页面抓取并解析论文元数据作为兜底。"""
+    url = f"https://arxiv.org/abs/{arxiv_id}"
+    html = robust_arxiv_request(url, timeout=20, max_retries=3, base_delay=3.0)
+
+    title_match = re.search(r'<meta\s+name=["\']citation_title["\']\s+content=["\'](.*?)["\']', html, re.DOTALL)
+    title = title_match.group(1).strip() if title_match else ""
+
+    raw_authors = re.findall(r'<meta\s+name=["\']citation_author["\']\s+content=["\'](.*?)["\']', html)
+    authors = []
+    for a in raw_authors:
+        if "," in a:
+            parts = [p.strip() for p in a.split(",", 1)]
+            authors.append(f"{parts[1]} {parts[0]}")
+        else:
+            authors.append(a.strip())
+
+    abs_match = re.search(
+        r'<blockquote\s+class=["\']abstract[^>]*>\s*<span\s+class=["\']descriptor["\']>Abstract:</span>\s*(.*?)\s*</blockquote>',
+        html,
+        re.DOTALL,
+    )
+    summary = ""
+    if abs_match:
+        summary = re.sub(r"\s+", " ", abs_match.group(1)).strip()
+
+    if not title:
+        raise ValueError(f"Failed to extract metadata from {url}")
+
+    return {
+        "title": title,
+        "summary": summary,
+        "arxiv_id": arxiv_id,
+        "abstract_url": f"https://arxiv.org/abs/{arxiv_id}",
+        "pdf_url": f"https://arxiv.org/pdf/{arxiv_id}",
+        "authors": authors,
+    }
+
+
 def fetch_single_paper(arxiv_id: str) -> dict:
-    """Fetch a single paper's metadata from arxiv API."""
+    """Fetch a single paper's metadata from arxiv API with fallback."""
     arxiv_id = arxiv_id.strip()
     # Strip URL if given
     for prefix in ["https://arxiv.org/abs/", "http://arxiv.org/abs/", "arxiv.org/abs/"]:
@@ -43,40 +84,41 @@ def fetch_single_paper(arxiv_id: str) -> dict:
         arxiv_id = arxiv_id[:-2]
 
     url = f"https://export.arxiv.org/api/query?id_list={arxiv_id}&max_results=1"
-    req = urllib.request.Request(url, headers={"User-Agent": "ArxivDigest/1.0"})
-    with urllib.request.urlopen(req, timeout=15) as resp:
-        xml_data = resp.read().decode("utf-8")
+    try:
+        xml_data = robust_arxiv_request(url, timeout=20, max_retries=4, base_delay=3.0)
+        root = ET.fromstring(xml_data)
+        ns = {
+            "atom": "http://www.w3.org/2005/Atom",
+            "arxiv": "http://arxiv.org/schemas/atom",
+        }
 
-    root = ET.fromstring(xml_data)
-    ns = {
-        "atom": "http://www.w3.org/2005/Atom",
-        "arxiv": "http://arxiv.org/schemas/atom",
-    }
+        entry = root.find("atom:entry", ns)
+        if entry is None:
+            raise ValueError(f"Paper not found: {arxiv_id}")
 
-    entry = root.find("atom:entry", ns)
-    if entry is None:
-        raise ValueError(f"Paper not found: {arxiv_id}")
+        title_el = entry.find("atom:title", ns)
+        summary_el = entry.find("atom:summary", ns)
 
-    title_el = entry.find("atom:title", ns)
-    summary_el = entry.find("atom:summary", ns)
+        title = " ".join(title_el.text.split()) if title_el is not None and title_el.text else ""
+        summary = " ".join(summary_el.text.split()) if summary_el is not None and summary_el.text else ""
 
-    title = " ".join(title_el.text.split()) if title_el is not None and title_el.text else ""
-    summary = " ".join(summary_el.text.split()) if summary_el is not None and summary_el.text else ""
+        authors = [
+            " ".join(a.find("atom:name", ns).text.split())
+            for a in entry.findall("atom:author", ns)
+            if a.find("atom:name", ns) is not None
+        ]
 
-    authors = [
-        " ".join(a.find("atom:name", ns).text.split())
-        for a in entry.findall("atom:author", ns)
-        if a.find("atom:name", ns) is not None
-    ]
-
-    return {
-        "title": title,
-        "summary": summary,
-        "arxiv_id": arxiv_id,
-        "abstract_url": f"https://arxiv.org/abs/{arxiv_id}",
-        "pdf_url": f"https://arxiv.org/pdf/{arxiv_id}",
-        "authors": authors,
-    }
+        return {
+            "title": title,
+            "summary": summary,
+            "arxiv_id": arxiv_id,
+            "abstract_url": f"https://arxiv.org/abs/{arxiv_id}",
+            "pdf_url": f"https://arxiv.org/pdf/{arxiv_id}",
+            "authors": authors,
+        }
+    except Exception as exc:
+        print(f"[reading] Primary arXiv API lookup failed for {arxiv_id}: {exc}. Trying abs page fallback...")
+        return fetch_single_paper_from_abs(arxiv_id)
 
 
 # ─── Decision-level Reading ───────────────────────────────────────────────────

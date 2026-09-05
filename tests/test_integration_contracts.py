@@ -4,7 +4,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, MagicMock, patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -13,6 +13,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 import utils
 import digest
 import paper_context
+import urllib.error
 
 
 class WorkflowContractTests(unittest.TestCase):
@@ -536,6 +537,110 @@ class OCRTransportTests(unittest.TestCase):
         get.return_value = poll
 
         self.assertIsNone(utils.ocr_arxiv_pdf("https://arxiv.org/abs/1234.5678"))
+
+
+class ArxivResilienceTests(unittest.TestCase):
+    def test_arxiv_user_agent_format(self):
+        ua = utils.get_arxiv_user_agent()
+        self.assertIn("ArxivDigest", ua)
+
+    @patch("utils.time.sleep")
+    @patch("utils.urllib.request.urlopen")
+    def test_robust_arxiv_request_retries_on_429(self, mock_urlopen, mock_sleep):
+        err_429 = urllib.error.HTTPError(
+            url="https://export.arxiv.org",
+            code=429,
+            msg="Too Many Requests",
+            hdrs={"Retry-After": "2"},
+            fp=None,
+        )
+        mock_resp = MagicMock()
+        mock_resp.__enter__.return_value.read.return_value = b"<xml>success</xml>"
+        mock_urlopen.side_effect = [err_429, mock_resp]
+
+        content = utils.robust_arxiv_request("https://export.arxiv.org", max_retries=2, base_delay=0.1)
+        self.assertEqual(content, "<xml>success</xml>")
+        self.assertEqual(mock_urlopen.call_count, 2)
+        mock_sleep.assert_called()
+
+    @patch("utils.fetch_arxiv_papers_rss")
+    @patch("utils.robust_arxiv_request")
+    def test_fetch_arxiv_papers_falls_back_to_rss_on_failure(self, mock_req, mock_rss):
+        mock_req.side_effect = RuntimeError("429 Throttled")
+        mock_rss.return_value = [{"title": "Fallback Paper", "arxiv_id": "2609.00001"}]
+
+        papers = utils.fetch_arxiv_papers(categories=["cs.AI"], keywords=[], lookback_days=1)
+        self.assertEqual(len(papers), 1)
+        self.assertEqual(papers[0]["title"], "Fallback Paper")
+        mock_rss.assert_called_once()
+
+    @patch("utils.robust_arxiv_request")
+    def test_fetch_arxiv_papers_rss_parses_feed(self, mock_req):
+        rss_xml = """<?xml version="1.0" encoding="UTF-8"?>
+        <rss version="2.0" xmlns:dc="http://purl.org/dc/elements/1.1/">
+            <channel>
+                <title>cs.AI</title>
+                <item>
+                    <title>RSS Test Paper</title>
+                    <link>https://arxiv.org/abs/2609.12345</link>
+                    <description>arXiv:2609.12345v1 Announce Type: new &#10;Abstract: This is a test abstract.</description>
+                    <dc:creator>Alice Smith, Bob Jones</dc:creator>
+                    <pubDate>Sat, 05 Sep 2026 00:00:00 -0400</pubDate>
+                </item>
+            </channel>
+        </rss>
+        """
+        mock_req.return_value = rss_xml
+        papers = utils.fetch_arxiv_papers_rss(["cs.AI"], lookback_days=7)
+        self.assertEqual(len(papers), 1)
+        self.assertEqual(papers[0]["title"], "RSS Test Paper")
+        self.assertEqual(papers[0]["arxiv_id"], "2609.12345")
+        self.assertEqual(papers[0]["summary"], "This is a test abstract.")
+        self.assertEqual(papers[0]["authors"], ["Alice Smith", "Bob Jones"])
+        self.assertEqual(papers[0]["abstract_url"], "https://arxiv.org/abs/2609.12345")
+        self.assertEqual(papers[0]["pdf_url"], "https://arxiv.org/pdf/2609.12345")
+
+    @patch("reading.fetch_single_paper_from_abs")
+    @patch("reading.robust_arxiv_request")
+    def test_fetch_single_paper_falls_back_to_abs_on_error(self, mock_req, mock_abs):
+        import reading
+        mock_req.side_effect = RuntimeError("429 Too Many Requests")
+        mock_abs.return_value = {
+            "title": "Abs Fallback Title",
+            "summary": "Abs summary",
+            "arxiv_id": "2609.12345",
+            "abstract_url": "https://arxiv.org/abs/2609.12345",
+            "pdf_url": "https://arxiv.org/pdf/2609.12345",
+            "authors": ["Author One"],
+        }
+        paper = reading.fetch_single_paper("2609.12345")
+        self.assertEqual(paper["title"], "Abs Fallback Title")
+        mock_abs.assert_called_once_with("2609.12345")
+
+    @patch("reading.robust_arxiv_request")
+    def test_fetch_single_paper_from_abs_parses_html(self, mock_req):
+        import reading
+        html = """
+        <html>
+        <head>
+            <meta name="citation_title" content="Deep Learning Breakthrough" />
+            <meta name="citation_author" content="LeCun, Yann" />
+            <meta name="citation_author" content="Bengio, Yoshua" />
+            <meta name="citation_date" content="2026/09/01" />
+        </head>
+        <body>
+            <blockquote class="abstract mathjax">
+                <span class="descriptor">Abstract:</span> We present a new method.
+            </blockquote>
+        </body>
+        </html>
+        """
+        mock_req.return_value = html
+        paper = reading.fetch_single_paper_from_abs("2609.99999")
+        self.assertEqual(paper["title"], "Deep Learning Breakthrough")
+        self.assertEqual(paper["authors"], ["Yann LeCun", "Yoshua Bengio"])
+        self.assertEqual(paper["summary"], "We present a new method.")
+        self.assertEqual(paper["arxiv_id"], "2609.99999")
 
 
 if __name__ == "__main__":

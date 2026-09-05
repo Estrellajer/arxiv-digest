@@ -7,12 +7,14 @@ import sys
 import io
 import json
 import time
+import random
 import re
 import zipfile
 import urllib.request
 import urllib.parse
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Optional
 
@@ -93,6 +95,156 @@ def llm_chat(
 
 # ─── Arxiv API ────────────────────────────────────────────────────────────────
 
+def get_arxiv_user_agent() -> str:
+    """获取合规的 arXiv User-Agent 头，符合 arXiv 官方 API 政策要求。"""
+    return os.environ.get(
+        "ARXIV_USER_AGENT",
+        "Mozilla/5.0 (compatible; ArxivDigest/1.0; +https://github.com/Estrellajer/arxiv-digest)",
+    )
+
+
+def robust_arxiv_request(
+    url: str,
+    timeout: int = 30,
+    max_retries: int = 5,
+    base_delay: float = 4.0,
+    headers: Optional[dict] = None,
+) -> str:
+    """
+    带有指数退避、Jitter 与 Retry-After 识别的健壮 HTTP GET 请求。
+    专用于对抗 arXiv API / Cloudflare 的 429 速率限制及偶发性 5xx / 网络超时。
+    """
+    req_headers = {
+        "User-Agent": get_arxiv_user_agent(),
+        "Accept": "application/atom+xml, application/xml, text/xml, text/html, */*",
+    }
+    if headers:
+        req_headers.update(headers)
+
+    for attempt in range(max_retries + 1):
+        try:
+            req = urllib.request.Request(url, headers=req_headers)
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return resp.read().decode("utf-8")
+        except urllib.error.HTTPError as err:
+            # 针对 429 (Too Many Requests) 及 5xx 临时错误进行重试
+            if err.code in (429, 500, 502, 503, 504) and attempt < max_retries:
+                retry_after = err.headers.get("Retry-After") if err.headers else None
+                delay = 0.0
+                if retry_after:
+                    try:
+                        delay = float(retry_after) + random.uniform(1.0, 3.0)
+                    except ValueError:
+                        pass
+                if delay <= 0:
+                    delay = min(base_delay * (2 ** attempt), 60.0) + random.uniform(0.5, 2.0)
+
+                print(
+                    f"[fetch] arXiv returned HTTP {err.code}. Waiting {delay:.1f}s before retry "
+                    f"(attempt {attempt + 1}/{max_retries})..."
+                )
+                time.sleep(delay)
+                continue
+            raise
+        except (urllib.error.URLError, TimeoutError, ConnectionResetError) as err:
+            if attempt < max_retries:
+                delay = min(base_delay * (2 ** attempt), 60.0) + random.uniform(0.5, 2.0)
+                print(
+                    f"[fetch] Network error: {err}. Waiting {delay:.1f}s before retry "
+                    f"(attempt {attempt + 1}/{max_retries})..."
+                )
+                time.sleep(delay)
+                continue
+            raise
+
+
+def fetch_arxiv_papers_rss(
+    categories: list[str],
+    lookback_days: int = 1,
+) -> list[dict]:
+    """
+    当 export.arxiv.org/api/query 遭遇不可恢复的 429 或宕机时，
+    通过官方 rss.arxiv.org 分类 RSS 订阅源进行自动容灾兜底。
+    """
+    end_date = datetime.now(timezone.utc)
+    start_date = end_date - timedelta(days=lookback_days)
+    print(f"[fetch-rss] Fallback to rss.arxiv.org for categories: {categories}, lookback={lookback_days}d")
+
+    papers_by_id = {}
+
+    for cat in categories:
+        cat_clean = cat.strip()
+        if not cat_clean:
+            continue
+        rss_url = f"https://rss.arxiv.org/rss/{cat_clean}"
+        try:
+            xml_data = robust_arxiv_request(rss_url, timeout=20, max_retries=3, base_delay=3.0)
+            root = ET.fromstring(xml_data)
+        except Exception as exc:
+            print(f"[fetch-rss] Failed to fetch RSS for {cat_clean}: {exc}")
+            continue
+
+        items = root.findall(".//item")
+        print(f"[fetch-rss] Got {len(items)} items from {cat_clean} RSS feed")
+
+        for item in items:
+            title = " ".join((item.findtext("title", "") or "").split())
+            link = (item.findtext("link", "") or "").strip()
+            desc = item.findtext("description", "") or ""
+            pub_date_str = item.findtext("pubDate", "") or ""
+            creator = item.findtext("{http://purl.org/dc/elements/1.1/}creator", "") or ""
+
+            # 抽取纯 arXiv ID (e.g. 2609.02981)
+            m = re.search(r"arxiv\.org/abs/([0-9]+\.[0-9]+)", link)
+            if m:
+                pure_id = m.group(1)
+            else:
+                pure_id = link.replace("http://arxiv.org/abs/", "").replace("https://arxiv.org/abs/", "").strip()
+                if pure_id.endswith("v1") or any(pure_id.endswith(f"v{i}") for i in range(10)):
+                    pure_id = pure_id[:-2]
+
+            if not pure_id:
+                continue
+
+            if pure_id in papers_by_id:
+                continue
+
+            # 从 description 中抽取摘要
+            # RSS description 格式通常为: "arXiv:XXXX.XXXXXv1 Announce Type: new \nAbstract: ..."
+            summary = desc
+            if "Abstract:" in desc:
+                summary = desc.split("Abstract:", 1)[1].strip()
+            summary = " ".join(summary.split())
+
+            # 作者列表
+            authors = [a.strip() for a in creator.split(",") if a.strip()] if creator else []
+
+            # 发布日期过滤
+            published_iso = ""
+            if pub_date_str:
+                try:
+                    pub_dt = parsedate_to_datetime(pub_date_str)
+                    published_iso = pub_dt.isoformat()
+                    if pub_dt.date() < start_date.date():
+                        continue
+                except Exception:
+                    published_iso = pub_date_str
+
+            papers_by_id[pure_id] = {
+                "title": title,
+                "summary": summary,
+                "arxiv_id": pure_id,
+                "abstract_url": f"https://arxiv.org/abs/{pure_id}",
+                "pdf_url": f"https://arxiv.org/pdf/{pure_id}",
+                "authors": authors,
+                "published": published_iso,
+            }
+
+    papers = list(papers_by_id.values())
+    print(f"[fetch-rss] {len(papers)} papers passed date filter (published >= {start_date.date()})")
+    return papers
+
+
 def fetch_arxiv_papers(
     categories: list[str],
     keywords: list[str],
@@ -102,6 +254,7 @@ def fetch_arxiv_papers(
     """
     从 arxiv API 拉取指定类别的新论文。
     返回论文列表，每篇包含 title, summary, arxiv_id, authors, published, pdf_url, abstract_url。
+    具备指数退避重试以及 RSS 自动容灾兜底能力。
     """
     cat_str = "+OR+".join(f"cat:{c}" for c in categories)
 
@@ -119,10 +272,11 @@ def fetch_arxiv_papers(
         f"&sortBy=submittedDate&sortOrder=descending"
     )
 
-    # 用 urllib 因为 httpx 有时对 arxiv 的 XML 返回处理有问题
-    req = urllib.request.Request(url, headers={"User-Agent": "ArxivDigest/1.0"})
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        xml_data = resp.read().decode("utf-8")
+    try:
+        xml_data = robust_arxiv_request(url, timeout=30, max_retries=5, base_delay=4.0)
+    except Exception as exc:
+        print(f"[fetch] Primary arXiv API query failed after retries ({exc}). Falling back to RSS feed...")
+        return fetch_arxiv_papers_rss(categories, lookback_days=lookback_days)
 
     root = ET.fromstring(xml_data)
     ns = {
@@ -174,6 +328,12 @@ def fetch_arxiv_papers(
         })
 
     print(f"[fetch] {len(papers)} papers passed date filter (published >= {start_date.date()})")
+    if not papers:
+        print("[fetch] Primary API returned 0 papers, attempting RSS fallback check...")
+        rss_papers = fetch_arxiv_papers_rss(categories, lookback_days=lookback_days)
+        if rss_papers:
+            return rss_papers
+
     return papers
 
 
