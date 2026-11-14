@@ -425,6 +425,7 @@ class OCRTransportTests(unittest.TestCase):
             ("1234.5678", "https://arxiv.org/pdf/1234.5678"),
         )
 
+    @patch.object(utils, "_get_dmx_ocr_config", new=lambda: ("", "", ""))
     @patch.object(utils, "MINERU_TOKEN", "")
     @patch("utils.time.sleep")
     @patch("utils.httpx.post")
@@ -460,6 +461,7 @@ class OCRTransportTests(unittest.TestCase):
         for call in get.call_args_list:
             self.assertNotIn("arxiv.org", call.args[0])
 
+    @patch.object(utils, "_get_dmx_ocr_config", new=lambda: ("", "", ""))
     @patch.object(utils, "MINERU_TOKEN", "tok")
     @patch("utils.time.sleep")
     @patch("utils.httpx.post")
@@ -493,6 +495,7 @@ class OCRTransportTests(unittest.TestCase):
         for call in get.call_args_list:
             self.assertNotIn("arxiv.org", call.args[0])
 
+    @patch.object(utils, "_get_dmx_ocr_config", new=lambda: ("", "", ""))
     @patch.object(utils, "MINERU_TOKEN", "tok")
     @patch("utils.time.sleep")
     @patch("utils.httpx.post")
@@ -521,6 +524,7 @@ class OCRTransportTests(unittest.TestCase):
         self.assertEqual(result["ocr_source"], "agent")
         self.assertEqual(post.call_args_list[1].args[0], utils.MINERU_AGENT_URL)
 
+    @patch.object(utils, "_get_dmx_ocr_config", new=lambda: ("", "", ""))
     @patch.object(utils, "MINERU_TOKEN", "")
     @patch("utils.time.sleep")
     @patch("utils.httpx.post")
@@ -537,6 +541,48 @@ class OCRTransportTests(unittest.TestCase):
         get.return_value = poll
 
         self.assertIsNone(utils.ocr_arxiv_pdf("https://arxiv.org/abs/1234.5678"))
+
+    @patch("utils._download_arxiv_pdf")
+    def test_local_only_extracts_first_two_pages_with_pymupdf(self, download):
+        import fitz
+
+        doc = fitz.open()
+        for i in range(1, 4):
+            page = doc.new_page()
+            page.insert_text((72, 72), f"Page {i} content")
+        download.return_value = doc.tobytes()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            result = utils.ocr_arxiv_pdf(
+                "https://arxiv.org/abs/1234.5678",
+                output_dir=tmp,
+                local_only=True,
+                max_pages=2,
+            )
+
+        self.assertEqual(result["ocr_source"], "pymupdf")
+        self.assertEqual(len(result["pages"]), 2)
+        self.assertIn("Page 1 content", result["markdown"])
+        self.assertIn("Page 2 content", result["markdown"])
+        self.assertNotIn("Page 3 content", result["markdown"])
+
+    @patch.dict(os.environ, {"LLM_API_KEY": "dmx-key", "LLM_BASE_URL": "https://www.dmxapi.cn/v1"}, clear=False)
+    @patch("utils._download_arxiv_pdf", return_value=b"%PDF-1.4 mock")
+    @patch("utils.httpx.post")
+    def test_dmx_ocr_reuses_llm_key_for_single_paper_reading(self, post, _download):
+        resp = Mock()
+        resp.status_code = 200
+        resp.json.return_value = {"code": 200, "result": {"markdown": "# DMX Paper\nBody"}}
+        post.return_value = resp
+
+        with tempfile.TemporaryDirectory() as tmp:
+            result = utils.ocr_arxiv_pdf("https://arxiv.org/abs/1234.5678", output_dir=tmp)
+
+        self.assertEqual(result["markdown"], "# DMX Paper\nBody")
+        self.assertEqual(result["ocr_source"], "dmx:hehe-tywd")
+        self.assertEqual(post.call_args.args[0], "https://www.dmxapi.cn/v1/responses")
+        self.assertEqual(post.call_args.kwargs["headers"]["Authorization"], "dmx-key")
+        self.assertEqual(post.call_args.kwargs["json"]["model"], "hehe-tywd")
 
 
 class ArxivResilienceTests(unittest.TestCase):

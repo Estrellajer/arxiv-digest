@@ -9,6 +9,7 @@ import json
 import time
 import random
 import re
+import base64
 import zipfile
 import urllib.request
 import urllib.parse
@@ -622,8 +623,10 @@ MINERU_AGENT_URL = os.environ.get("MINERU_AGENT_URL", "https://mineru.net/api/v1
 MINERU_AGENT_QUERY_URL = os.environ.get("MINERU_AGENT_QUERY_URL", "https://mineru.net/api/v1/agent/parse")
 # 只解析前 N 页：论文正文通常 <=20 页，之后多为补充材料；也正好是轻量 API 的页数上限。
 OCR_PAGE_LIMIT = int(os.environ.get("OCR_PAGE_LIMIT", "20"))
+LOCAL_PDF_PAGES = int(os.environ.get("LOCAL_PDF_PAGES", "2"))
 OCR_LANGUAGE = os.environ.get("OCR_LANGUAGE", "en")
-OCR_TIMEOUT_SECONDS = int(os.environ.get("OCR_TIMEOUT_SECONDS", "600"))
+OCR_TIMEOUT_SECONDS = int(os.environ.get("OCR_TIMEOUT_SECONDS", "180"))
+DMX_OCR_MODEL = os.environ.get("DMX_OCR_MODEL", "hehe-tywd")
 
 
 def _normalize_arxiv_pdf_url(arxiv_url: str) -> tuple[str, str]:
@@ -768,28 +771,147 @@ def _mineru_agent_parse(pdf_url: str, arxiv_id: str) -> Optional[str]:
     return md_resp.text
 
 
-def ocr_arxiv_pdf(arxiv_url: str, output_dir: str = "output/ocr", download_images: bool = False) -> dict:
+def _download_arxiv_pdf(pdf_url: str, timeout: int = 60) -> bytes:
+    """下载 arXiv PDF 二进制内容。"""
+    headers = {"User-Agent": get_arxiv_user_agent()}
+    resp = httpx.get(pdf_url, headers=headers, timeout=timeout, follow_redirects=True)
+    resp.raise_for_status()
+    return resp.content
+
+
+def _get_dmx_ocr_config() -> tuple[str, str, str]:
+    """返回 (api_key, responses_url, model)。当 LLM_BASE_URL 为 DMXAPI 时自动复用 LLM_API_KEY。"""
+    llm_base = os.environ.get("LLM_BASE_URL", "").strip()
+    api_key = (os.environ.get("DMX_OCR_API_KEY") or os.environ.get("OCR_API_KEY") or "").strip()
+    if not api_key and "dmxapi" in llm_base.lower():
+        api_key = os.environ.get("LLM_API_KEY", "").strip()
+
+    responses_url = os.environ.get("DMX_OCR_URL", "").strip()
+    if not responses_url:
+        if "dmxapi" in llm_base.lower():
+            base = llm_base.rstrip("/")
+            responses_url = base if base.endswith("/responses") else f"{base}/responses"
+        else:
+            responses_url = "https://www.dmxapi.cn/v1/responses"
+    return api_key, responses_url, DMX_OCR_MODEL
+
+
+def _dmx_ocr_parse(pdf_url: str, arxiv_id: str) -> Optional[str]:
+    """通过 DMXAPI (hehe-tywd) 解析 PDF，本地下载后传 base64 避免服务端抓 arxiv 超时。"""
+    api_key, responses_url, model = _get_dmx_ocr_config()
+    if not api_key:
+        return None
+
+    try:
+        pdf_bytes = _download_arxiv_pdf(pdf_url)
+    except Exception as exc:
+        print(f"[OCR] Failed to download PDF for DMXAPI ({arxiv_id}): {exc}")
+        return None
+
+    pdf_b64 = base64.b64encode(pdf_bytes).decode("utf-8")
+    headers = {"Content-Type": "application/json", "Authorization": api_key}
+    payload = {
+        "model": model,
+        "input": pdf_b64,
+        "page_start": 0,
+        "page_count": OCR_PAGE_LIMIT,
+        "parse_mode": "auto",
+    }
+
+    try:
+        resp = httpx.post(responses_url, headers=headers, json=payload, timeout=OCR_TIMEOUT_SECONDS)
+    except Exception as exc:
+        print(f"[OCR] DMXAPI request error: {exc}")
+        return None
+
+    if resp.status_code != 200:
+        print(f"[OCR] DMXAPI failed: {resp.status_code} {resp.text[:200]}")
+        return None
+
+    body = resp.json()
+    result = body.get("result") or {}
+    markdown = result.get("markdown")
+    if not markdown and isinstance(result.get("detail"), list):
+        markdown = "\n\n".join(str(item.get("text", "")).strip() for item in result["detail"] if item.get("text"))
+    if not markdown:
+        print(f"[OCR] DMXAPI returned empty markdown: {body.get('message') or body.get('msg', '')}")
+        return None
+    return markdown
+
+
+def extract_arxiv_pdf_local(
+    arxiv_url: str,
+    output_dir: str = "output/ocr",
+    max_pages: int = LOCAL_PDF_PAGES,
+) -> Optional[dict]:
+    """使用 PyMuPDF 本地免费提取 arXiv PDF 前 N 页文本，0 费用且无需外部排队。"""
+    import fitz
+
+    arxiv_id, pdf_url = _normalize_arxiv_pdf_url(arxiv_url)
+    pdf_bytes = _download_arxiv_pdf(pdf_url)
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    page_texts = []
+    for page in doc[:max(1, max_pages)]:
+        text = (page.get_text("text") or "").strip()
+        if text:
+            page_texts.append(text)
+    doc.close()
+
+    if not page_texts:
+        print(f"[OCR] Local PyMuPDF extracted empty text for {arxiv_id}")
+        return None
+
+    markdown = "\n\n---\n\n".join(page_texts)
+    os.makedirs(output_dir, exist_ok=True)
+    md_path = os.path.join(output_dir, "doc.md")
+    with open(md_path, "w", encoding="utf-8") as f:
+        f.write(markdown)
+    print(f"[OCR] Local PyMuPDF extracted {len(page_texts)} page(s) -> {md_path} ({len(markdown)} chars)")
+
+    return {
+        "markdown": markdown,
+        "pages": [{"md": text, "images": []} for text in page_texts],
+        "pdf_url": pdf_url,
+        "arxiv_id": arxiv_id,
+        "ocr_source": "pymupdf",
+    }
+
+
+def ocr_arxiv_pdf(
+    arxiv_url: str,
+    output_dir: str = "output/ocr",
+    download_images: bool = False,
+    local_only: bool = False,
+    max_pages: Optional[int] = None,
+) -> dict:
     """
-    通过 MinerU 解析 arxiv 论文 PDF，返回 Markdown 文本。
+    解析 arxiv 论文 PDF，返回 Markdown 文本。
 
-    设计要点：
-    - 直接把 arXiv PDF 链接交给 MinerU，由服务端远程下载并解析，本地 / CI 不下载 PDF。
-    - 仅解析前 OCR_PAGE_LIMIT 页（默认 20）。
-    - 优先精准解析 API（需 MINERU_TOKEN，vlm 模型），失败自动回退 Agent 轻量解析 API（免登录）。
-
-    参数:
-        arxiv_url: arxiv 链接或 ID（abs / pdf / 纯 ID 均可）
-        output_dir: 结果 Markdown 的输出目录
-        download_images: 兼容旧签名；当前实现只取文本，此参数不再使用
-
-    返回:
-        {"markdown": "全文markdown文本", "pages": [{"md": "...", "images": []}], "pdf_url": "...", "arxiv_id": "...", "ocr_source": "precision|agent"}
+    - local_only=True（日常 digest 推荐）：直接用 PyMuPDF 本地免费提取前 N 页。
+    - local_only=False（单篇精读/实验提取）：优先 DMXAPI (hehe-tywd)，其次 MinerU 精准/Agent API。
     """
+    if local_only:
+        return extract_arxiv_pdf_local(
+            arxiv_url,
+            output_dir=output_dir,
+            max_pages=max_pages or LOCAL_PDF_PAGES,
+        )
+
     arxiv_id, pdf_url = _normalize_arxiv_pdf_url(arxiv_url)
 
     markdown = None
     source = ""
-    if MINERU_TOKEN:
+
+    dmx_key, _, dmx_model = _get_dmx_ocr_config()
+    if dmx_key:
+        print(f"[OCR] DMXAPI ({dmx_model}) parsing: {pdf_url} (pages 1-{OCR_PAGE_LIMIT})")
+        markdown = _dmx_ocr_parse(pdf_url, arxiv_id)
+        if markdown is not None:
+            source = f"dmx:{dmx_model}"
+        else:
+            print("[OCR] DMXAPI parse failed; falling back to MinerU")
+
+    if markdown is None and MINERU_TOKEN:
         print(f"[OCR] MinerU precision parsing: {pdf_url} (pages 1-{OCR_PAGE_LIMIT}, model={MINERU_MODEL_VERSION})")
         markdown = _mineru_precision_parse(pdf_url, arxiv_id)
         if markdown is not None:
@@ -804,7 +926,7 @@ def ocr_arxiv_pdf(arxiv_url: str, output_dir: str = "output/ocr", download_image
             source = "agent"
 
     if markdown is None:
-        print("[OCR] All MinerU parse paths failed")
+        print("[OCR] All OCR parse paths failed")
         return None
 
     os.makedirs(output_dir, exist_ok=True)

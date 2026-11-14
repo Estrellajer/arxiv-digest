@@ -25,7 +25,7 @@ from utils import (
     fetch_arxiv_papers,
     send_feishu_card, build_digest_card,
     chunk_list,
-    ocr_arxiv_pdf,
+    ocr_arxiv_pdf, LOCAL_PDF_PAGES,
 )
 from paper_context import (
     apply_institution_bonus, build_ocr_evidence, load_prompt,
@@ -222,7 +222,12 @@ def enrich_with_ocr(
     def enrich(paper: dict) -> dict:
         try:
             output_dir = os.path.join("output", "ocr", paper["arxiv_id"].replace("/", "_"))
-            ocr_result = ocr_arxiv_pdf(paper["abstract_url"], output_dir=output_dir)
+            ocr_result = ocr_arxiv_pdf(
+                paper["abstract_url"],
+                output_dir=output_dir,
+                local_only=True,
+                max_pages=LOCAL_PDF_PAGES,
+            )
             evidence = build_ocr_evidence(ocr_result, paper["abstract_url"])
         except Exception as exc:
             print(f"[digest OCR] {paper['arxiv_id']} failed: {exc}")
