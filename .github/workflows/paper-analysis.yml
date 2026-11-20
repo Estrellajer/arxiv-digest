@@ -35,12 +35,17 @@ jobs:
 
       - name: Extract arxiv URL from issue
         id: paper
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          ISSUE_BODY: ${{ github.event.issue.body }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          DISPATCH_URL: ${{ github.event.inputs.arxiv_url }}
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "url=${{ github.event.inputs.arxiv_url }}" >> $GITHUB_OUTPUT
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            echo "url=$DISPATCH_URL" >> $GITHUB_OUTPUT
           else
             # 从 Issue body 中提取 arxiv URL
-            BODY="${{ github.event.issue.body }}"
+            BODY="$ISSUE_BODY"
             URL=$(echo "$BODY" | grep -oP 'https://arxiv\.org/abs/\S+' | head -1)
             if [ -z "$URL" ]; then
               URL=$(echo "$BODY" | grep -oP 'arxiv\.org/abs/\S+' | head -1)
@@ -53,7 +58,7 @@ jobs:
               exit 1
             fi
             echo "url=$URL" >> $GITHUB_OUTPUT
-            echo "issue_number=${{ github.event.issue.number }}" >> $GITHUB_OUTPUT
+            echo "issue_number=$ISSUE_NUMBER" >> $GITHUB_OUTPUT
           fi
 
       - name: Run paper-reading
@@ -67,8 +72,9 @@ jobs:
           FEISHU_RECEIVE_ID: ${{ secrets.FEISHU_RECEIVE_ID }}
           FEISHU_RECEIVE_ID_TYPE: ${{ secrets.FEISHU_RECEIVE_ID_TYPE }}
           MINERU_TOKEN: ${{ secrets.MINERU_TOKEN }}
+          PAPER_URL: ${{ steps.paper.outputs.url }}
         run: |
-          python scripts/reading.py --url "${{ steps.paper.outputs.url }}" --use-ocr --push-to-feishu 2>&1 | tee reading_output.txt
+          python scripts/reading.py --url "$PAPER_URL" --use-ocr --push-to-feishu 2>&1 | tee reading_output.txt
 
       - name: Extract analysis JSON
         id: extract
